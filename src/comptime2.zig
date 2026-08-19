@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const Value = @import("value.zig").Value;
 
 pub const parse = @import("parser-gdev.zig").parse;
+pub const parse2 = @import("parser2-gdev.zig").parse;
 
 const ComptimeScope = @import("comptime-scope.zig").ComptimeScope;
 
@@ -42,6 +43,22 @@ pub const Node = struct {
         return .init(.{ .sequence_ = sequence_ });
     }
 
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        switch (self.node_type) {
+            .literal_ => |literal_| try writer.print("literal{{ {}: {} }}", .{ literal_.get(), literal_.type }),
+            .identifier_ => |identifier_| try writer.print("identifier{{ {s} }}", .{identifier_.identifier}),
+            .binding_ => |binding_| try writer.print("binding{{ {s} = {f} }}", .{ binding_.identifier, binding_.target.* }),
+            .sequence_ => |sequence_| {
+                inline for (sequence_) |node| {
+                    try writer.print("{f}\n", .{node});
+                }
+            },
+        }
+    }
+
     pub const NodeType = union(enum) {
         literal_: Literal,
         binding_: Binding,
@@ -79,23 +96,25 @@ pub const Node = struct {
 };
 
 pub const RuntimeScope = struct {
+    arena: std.heap.ArenaAllocator,
     map: std.StringHashMap(V),
 
     pub const K = []const u8;
     pub const V = *anyopaque;
 
     pub fn init(allocator: Allocator) @This() {
-        return .{ .map = .init(allocator) };
+        return .{ .arena = .init(allocator), .map = .init(allocator) };
     }
 
     pub fn deinit(self: *@This()) void {
+        self.arena.deinit();
         self.map.deinit();
     }
 
     pub fn put(self: *@This(), key: K, value: anytype) void {
-        const value_ptr = self.map.allocator.create(@TypeOf(value)) catch unreachable;
+        const value_ptr = self.arena.allocator().create(@TypeOf(value)) catch unreachable;
         value_ptr.* = value;
-        self.map.put(key, value) catch unreachable;
+        self.map.put(key, value_ptr) catch unreachable;
     }
 
     pub fn get(self: *@This(), comptime T: type, key: K) ?T {
@@ -104,7 +123,8 @@ pub const RuntimeScope = struct {
     }
 
     pub fn getPtr(self: *@This(), comptime T: type, key: K) ?*T {
-        return @as(?*T, @ptrCast(@alignCast(self.map.get(key))));
+        const ptr = self.map.get(key) orelse return null;
+        return @as(*T, @ptrCast(@alignCast(ptr)));
     }
 };
 
@@ -124,9 +144,7 @@ pub const IRContext = struct {
     }
 
     pub fn bind(self: *@This(), identifier: []const u8, value: anytype) void {
-        const value_ptr = self.allocator.create(@TypeOf(value)) catch unreachable;
-        value_ptr.* = value;
-        self.scope.put(identifier, value_ptr);
+        self.scope.put(identifier, value);
     }
 };
 
@@ -147,7 +165,7 @@ pub const IRNode = struct {
     }
 
     pub fn binding(identifier_: []const u8, expr: IRNode) @This() {
-        return .init(expr.type, .{ .binding_ = .{ .identifier = identifier_, .expr = &expr } });
+        return .init(void, .{ .binding_ = .{ .identifier = identifier_, .expr = &expr } });
     }
 
     pub fn sequence(body: []const IRNode, last: IRNode) @This() {
@@ -193,7 +211,7 @@ fn compileLiteral(_: *CompilationContext, literal: Node.Literal) IRNode {
 
 fn compileBinding(ctx: *CompilationContext, binding: Node.Binding) IRNode {
     if (ctx.type_ctx.scope.has(binding.identifier)) @compileError("duplicate identifier " ++ binding.identifier);
-    const ir_node = compile(binding.target.*);
+    const ir_node = compile(ctx, binding.target.*);
     ctx.type_ctx.scope.put(binding.identifier, ir_node.type);
     return .binding(binding.identifier, ir_node);
 }
@@ -228,7 +246,7 @@ pub fn evaluate(ctx: *IRContext, comptime node: IRNode) node.type {
     return switch (comptime node.node_type) {
         .literal_ => |literal| evaluateLiteral(node.type, ctx, literal),
         .binding_ => |binding| evaluateBinding(ctx, binding),
-        .identifier_ => |identifier| evaluateIdentifier(ctx, identifier),
+        .identifier_ => |identifier| evaluateIdentifier(node.type, ctx, identifier),
         .sequence_ => |sequence| evaluateSequence(ctx, sequence),
     };
 }

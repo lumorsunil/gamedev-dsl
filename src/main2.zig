@@ -16,17 +16,20 @@ const source2 = ct.Node.sequence(&.{
 pub fn main(init: std.process.Init) !void {
     const compilation_result = comptime brk: {
         const file_source = @embedFile("game.gdev");
-        const ast = ct.parse(file_source) catch |err| {
+        const ast = ct.parse2(file_source) catch |err| {
             @compileError("error parsing code: " ++ @errorName(err));
         };
 
         var c_ctx: ct.CompilationContext = .empty;
         const result = ct.compile(&c_ctx, ast);
         break :brk .{
+            .ast = ast,
             .ir = result,
             .ctx = c_ctx,
         };
     };
+
+    std.log.debug("ast: {f}", .{compilation_result.ast});
 
     var ir_ctx: ct.IRContext = .init(init.gpa);
     defer ir_ctx.deinit();

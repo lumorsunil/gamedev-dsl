@@ -49,6 +49,14 @@ fn ParseFunction(comptime T: type) type {
     return *const fn (*ParseContext) ParseError!T;
 }
 
+fn ParserPayload(parser: anytype) type {
+    if (comptime @TypeOf(parser) == type) {
+        return parser.Payload;
+    } else {
+        return @TypeOf(parser).Payload;
+    }
+}
+
 fn PayloadType(f: anytype) type {
     const return_type = @typeInfo(@TypeOf(f)).@"fn".return_type orelse void;
     return @typeInfo(return_type).error_union.payload;
@@ -60,27 +68,26 @@ pub const ParseError = error{
     NotSupported,
 };
 
-pub const Parser = struct {
-    f: *const anyopaque,
-    payload_type: type,
+pub fn Parser(comptime T: type) type {
+    return struct {
+        f: ParseFunction(T),
 
-    pub fn init(f: anytype) @This() {
-        return .{ .f = f, .payload_type = PayloadType(f) };
-    }
+        pub const Payload = T;
 
-    pub fn get(self: @This()) ParseFunction(self.payload_type) {
-        return @ptrCast(self.f);
-    }
+        pub fn init(f: anytype) @This() {
+            return .{ .f = f };
+        }
 
-    pub fn run(self: @This(), ctx: *ParseContext) ParseError!self.payload_type {
-        return self.get()(ctx);
-    }
-};
+        pub fn run(self: @This(), ctx: *ParseContext) ParseError!T {
+            return self.f(ctx);
+        }
+    };
+}
 
-fn tryParse(parser: Parser) Parser {
+fn tryParse(parser: anytype) Parser(?ParserPayload(parser)) {
     return .init(
         struct {
-            fn tryParse_(ctx: *ParseContext) ParseError!?parser.payload_type {
+            fn tryParse_(ctx: *ParseContext) ParseError!?ParserPayload(parser) {
                 const snapshot = ctx.snapshot();
                 const maybe_result = parser.run(ctx);
 
@@ -95,34 +102,36 @@ fn tryParse(parser: Parser) Parser {
     );
 }
 
-pub fn oneOf(parsers: anytype) Parser {
-    var payload_type = parsers.@"0".payload_type;
+fn OneOfPayload(parsers: anytype) type {
+    var payload_type = ParserPayload(parsers.@"0");
     for (parsers) |parser| {
-        if (payload_type != parser.payload_type) {
+        if (payload_type != ParserPayload(parser)) {
             payload_type = Value;
             break;
         }
     }
     const payload_type_ = payload_type;
 
-    return .init(
-        struct {
-            fn oneOf_(ctx: *ParseContext) ParseError!payload_type_ {
-                for (parsers) |parser| {
-                    const f = tryParse(parser).get();
-                    if (try f(ctx)) |result| {
-                        if (payload_type_ == Value) {
-                            return .init(result);
-                        } else {
-                            return result;
-                        }
+    return payload_type_;
+}
+
+pub fn oneOf(parsers: anytype) Parser(OneOfPayload(parsers)) {
+    return .init(struct {
+        fn oneOf_(ctx: *ParseContext) ParseError!OneOfPayload(parsers) {
+            for (parsers) |parser| {
+                const parser_try = tryParse(parser);
+                if (try parser_try.run(ctx)) |result| {
+                    if (OneOfPayload(parsers) == Value) {
+                        return .init(result);
+                    } else {
+                        return result;
                     }
                 }
-
-                return ParseError.UnexpectedExpression;
             }
-        }.oneOf_,
-    );
+
+            return ParseError.UnexpectedExpression;
+        }
+    }.oneOf_);
 }
 
 // pub fn deferred(getParser: *const fn () Parser) Parser {
@@ -138,28 +147,28 @@ fn SequencePayload(parsers: anytype) type {
     var field_types: []const type = &.{};
 
     for (parsers) |parser| {
-        const item: []const type = &.{parser.payload_type};
+        const item: []const type = &.{ParserPayload(parser)};
         field_types = field_types ++ item;
     }
 
     return @Tuple(field_types);
 }
 
-pub fn sequence(parsers: anytype) Parser {
+pub fn sequence(parsers: anytype) Parser(SequencePayload(parsers)) {
     return .init(struct {
         pub fn sequence_(ctx: *ParseContext) ParseError!SequencePayload(parsers) {
             var payloads: SequencePayload(parsers) = undefined;
 
-            for (parsers, &payloads) |parser, *payload| {
+            inline for (parsers, &payloads) |parser, *payload| {
                 payload.* = try parser.run(ctx);
             }
 
             return payloads;
         }
-    });
+    }.sequence_);
 }
 
-pub fn token(tag: std.zig.Token.Tag) Parser {
+pub fn token(tag: std.zig.Token.Tag) Parser(std.zig.Token) {
     return .init(struct {
         fn token_(ctx: *ParseContext) ParseError!std.zig.Token {
             return ctx.expect(tag);
@@ -171,7 +180,7 @@ fn ReturnType(f: anytype) type {
     return @typeInfo(@TypeOf(f)).@"fn".return_type orelse void;
 }
 
-pub fn map(parser: Parser, f: anytype) Parser {
+pub fn map(parser: anytype, f: anytype) Parser(ReturnType(f)) {
     return .init(struct {
         fn map_(ctx: *ParseContext) ParseError!ReturnType(f) {
             const a = try parser.run(ctx);
@@ -180,7 +189,7 @@ pub fn map(parser: Parser, f: anytype) Parser {
     }.map_);
 }
 
-pub fn pure(value: anytype) Parser {
+pub fn pure(value: anytype) Parser(@TypeOf(value)) {
     return .init(struct {
         fn pure_(_: *ParseContext) ParseError!@TypeOf(value) {
             return value;
@@ -188,15 +197,22 @@ pub fn pure(value: anytype) Parser {
     }.pure_);
 }
 
-pub fn bind(parser: Parser, f: anytype) Parser {
-    const M = ReturnType(f);
-    if (M != Parser) @compileError("expected return type Parser, got " ++ @typeName(M));
-
+pub fn bind(parser: anytype, f: anytype) ReturnType(f) {
     return .init(struct {
-        fn bind_(ctx: *ParseContext) ParseError!Value {
+        fn bind_(ctx: *ParseContext) ParseError!ParserPayload(ReturnType(f)) {
             const a = try parser.run(ctx);
             const bind_parser = f(a);
             return .init(bind_parser.run(ctx));
         }
     }.bind_);
 }
+
+pub fn mkParser(f: anytype) Parser(PayloadType(f)) {
+    return .init(f);
+}
+
+pub const get_context: Parser(*ParseContext) = .init(struct {
+    fn getContext_(ctx: *ParseContext) ParseError!*ParseContext {
+        return ctx;
+    }
+}.getContext_);

@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("parser-core.zig");
+const core = @import("parser2.zig");
 const ParseError = core.ParseError;
 const ParseContext = core.ParseContext;
 const Parser = core.Parser;
@@ -15,7 +15,7 @@ pub fn parse(source: [:0]const u8) ParseError!Node {
 
 const main_parser = parse_expressions;
 
-const parse_expressions = Parser.init(parseExpressions);
+const parse_expressions: Parser(Node) = .init(parseExpressions);
 
 fn parseExpressions(ctx: *ParseContext) ParseError!Node {
     var nodes: []const Node = &.{};
@@ -35,18 +35,17 @@ fn parseExpressions(ctx: *ParseContext) ParseError!Node {
     return .sequence(nodes);
 }
 
-const parse_expression = core.deferred(
-    struct {
-        fn parseExpression() Parser {
-            return core.oneOf(.{
-                parse_binding,
-                parse_number_literal,
-            });
-        }
-    }.parseExpression,
-);
+const parse_expression = Parser(Node).init(parseExpression);
 
-const parse_number_literal = Parser.init(parseNumberLiteral);
+fn parseExpression(ctx: *ParseContext) ParseError!Node {
+    return core.oneOf(.{
+        parse_binding,
+        parse_identifier,
+        parse_number_literal,
+    }).run(ctx);
+}
+
+const parse_number_literal = Parser(Node).init(parseNumberLiteral);
 
 fn parseNumberLiteral(ctx: *ParseContext) ParseError!Node {
     const token = try ctx.expect(.number_literal);
@@ -60,8 +59,22 @@ fn parseNumberLiteral(ctx: *ParseContext) ParseError!Node {
     };
 }
 
-const parse_binding = core.map(
+const parse_identifier: Parser(Node) = core.map(
     core.sequence(.{
+        core.token(.identifier),
+        core.get_context,
+    }),
+    parseIdentifierMap,
+);
+
+fn parseIdentifierMap(result: struct { Token, *ParseContext }) Node {
+    const token, const ctx = result;
+    return .identifier(ctx.lexeme(token.loc));
+}
+
+const parse_binding: Parser(Node) = core.map(
+    core.sequence(.{
+        core.get_context,
         core.token(.keyword_const),
         core.token(.identifier),
         core.token(.equal),
@@ -70,6 +83,8 @@ const parse_binding = core.map(
     parseBindingMap,
 );
 
-fn parseBindingMap(result: struct { Token, []const u8, Token, Node }) Node {
-    return .binding(result.@"1", result.@"3");
+fn parseBindingMap(result: struct { *ParseContext, Token, Token, Token, Node }) Node {
+    const ctx, _, const identifier_token, _, const node = result;
+    const identifier = ctx.lexeme(identifier_token.loc);
+    return .binding(identifier, node);
 }
