@@ -4,6 +4,21 @@ const Value = @import("value.zig").Value;
 
 pub const parse = @import("parser-gdev.zig").parse;
 pub const parse2 = @import("parser2-gdev.zig").parse;
+pub const ParseContext = @import("parser2.zig").ParseContext;
+
+pub fn tokenize(source: [:0]const u8) []const std.zig.Token.Tag {
+    var tokens: []const std.zig.Token.Tag = &.{};
+    var tokenizer = std.zig.Tokenizer.init(source);
+
+    while (true) {
+        const token = tokenizer.next();
+        if (token.tag == .eof) break;
+        const item: []const std.zig.Token.Tag = &.{token.tag};
+        tokens = tokens ++ item;
+    }
+
+    return tokens;
+}
 
 const ComptimeScope = @import("comptime-scope.zig").ComptimeScope;
 

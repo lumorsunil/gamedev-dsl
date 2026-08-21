@@ -188,6 +188,10 @@ pub fn pure(value: anytype) Parser {
     }.pure_);
 }
 
+// fmap :: (Monad m) => m a -> (a -> b) -> m b
+// (>>=) = bind :: (Monad m) => m a -> (a -> m b) -> m b
+// return :: (Monad m) => a -> m a
+// fmap ma f = bind ma (\a -> return a)
 pub fn bind(parser: Parser, f: anytype) Parser {
     const M = ReturnType(f);
     if (M != Parser) @compileError("expected return type Parser, got " ++ @typeName(M));

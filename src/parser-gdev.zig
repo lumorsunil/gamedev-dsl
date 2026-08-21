@@ -35,16 +35,10 @@ fn parseExpressions(ctx: *ParseContext) ParseError!Node {
     return .sequence(nodes);
 }
 
-const parse_expression = core.deferred(
-    struct {
-        fn parseExpression() Parser {
-            return core.oneOf(.{
-                parse_binding,
-                parse_number_literal,
-            });
-        }
-    }.parseExpression,
-);
+const parse_expression = core.oneOf(.{
+    parse_binding,
+    parse_number_literal,
+});
 
 const parse_number_literal = Parser.init(parseNumberLiteral);
 
