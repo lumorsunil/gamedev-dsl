@@ -1,3 +1,2 @@
-const my_variable = -5;
-my_variable;
-1;
+const x = 5;
+x;

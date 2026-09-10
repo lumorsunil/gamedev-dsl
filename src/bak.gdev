@@ -1,0 +1,13 @@
+const rl = @import("rl");
+
+pub fn main() void {
+    rl.initWindow(800, 600);
+    until (rl.windowShouldClose()) loop();
+    rl.closeWindow();
+}
+
+pub fn loop() void {
+    rl.beginDraw();
+    rl.clearBackground(.black);
+    rl.endDraw();
+}
