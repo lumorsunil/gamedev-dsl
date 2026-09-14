@@ -1,6 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Value = @import("value.zig").Value;
+const IRNode = @import("evaluate.zig").IRNode;
+const IRInstruction = @import("effect-vm.zig").IRInstruction;
+const VM = @import("effect-vm.zig").VM;
 
 pub const parse = @import("parser-gdev.zig").parse;
 pub const parse2 = @import("parser2-gdev.zig").parse;
@@ -110,107 +113,6 @@ pub const Node = struct {
     }
 };
 
-pub const RuntimeScope = struct {
-    arena: std.heap.ArenaAllocator,
-    map: std.StringHashMap(V),
-
-    pub const K = []const u8;
-    pub const V = *anyopaque;
-
-    pub fn init(allocator: Allocator) @This() {
-        return .{ .arena = .init(allocator), .map = .init(allocator) };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        self.arena.deinit();
-        self.map.deinit();
-    }
-
-    pub fn put(self: *@This(), key: K, value: anytype) void {
-        const value_ptr = self.arena.allocator().create(@TypeOf(value)) catch unreachable;
-        value_ptr.* = value;
-        self.map.put(key, value_ptr) catch unreachable;
-    }
-
-    pub fn get(self: *@This(), comptime T: type, key: K) ?T {
-        const ptr = self.getPtr(T, key) orelse return null;
-        return ptr.*;
-    }
-
-    pub fn getPtr(self: *@This(), comptime T: type, key: K) ?*T {
-        const ptr = self.map.get(key) orelse return null;
-        return @as(*T, @ptrCast(@alignCast(ptr)));
-    }
-};
-
-pub const IRContext = struct {
-    allocator: Allocator,
-    scope: RuntimeScope,
-
-    pub fn init(allocator: Allocator) @This() {
-        return .{
-            .allocator = allocator,
-            .scope = .init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        self.scope.deinit();
-    }
-
-    pub fn bind(self: *@This(), identifier: []const u8, value: anytype) void {
-        self.scope.put(identifier, value);
-    }
-};
-
-pub const IRNode = struct {
-    node_type: IRNodeType,
-    type: type,
-
-    pub fn init(type_: type, node_type: IRNodeType) @This() {
-        return .{ .node_type = node_type, .type = type_ };
-    }
-
-    pub fn literal(value: anytype) @This() {
-        return .init(@TypeOf(value), .{ .literal_ = .init(value) });
-    }
-
-    pub fn identifier(type_: type, identifier_: []const u8) @This() {
-        return .init(type_, .{ .identifier_ = .{ .identifier = identifier_ } });
-    }
-
-    pub fn binding(identifier_: []const u8, expr: IRNode) @This() {
-        return .init(void, .{ .binding_ = .{ .identifier = identifier_, .expr = &expr } });
-    }
-
-    pub fn sequence(body: []const IRNode, last: IRNode) @This() {
-        return .init(last.type, .{ .sequence_ = .{ .body = body, .last = &last } });
-    }
-
-    pub const Literal = Value;
-
-    pub const Identifier = struct {
-        identifier: []const u8,
-    };
-
-    pub const Binding = struct {
-        identifier: []const u8,
-        expr: *const IRNode,
-    };
-
-    pub const Sequence = struct {
-        body: []const IRNode,
-        last: *const IRNode,
-    };
-
-    pub const IRNodeType = union(enum) {
-        literal_: Literal,
-        identifier_: Identifier,
-        binding_: Binding,
-        sequence_: Sequence,
-    };
-};
-
 pub fn compile(ctx: *CompilationContext, node: Node) IRNode {
     return switch (node.node_type) {
         .literal_ => |literal| compileLiteral(ctx, literal),
@@ -255,37 +157,4 @@ fn compileSequence(ctx: *CompilationContext, sequence: Node.Sequence) IRNode {
     const last = compile(ctx, sequence[sequence.len - 1]);
 
     return .sequence(body, last);
-}
-
-pub fn evaluate(ctx: *IRContext, comptime node: IRNode) node.type {
-    return switch (comptime node.node_type) {
-        .literal_ => |literal| evaluateLiteral(node.type, ctx, literal),
-        .binding_ => |binding| evaluateBinding(ctx, binding),
-        .identifier_ => |identifier| evaluateIdentifier(node.type, ctx, identifier),
-        .sequence_ => |sequence| evaluateSequence(ctx, sequence),
-    };
-}
-
-fn evaluateLiteral(comptime T: type, _: *IRContext, comptime literal: IRNode.Literal) T {
-    return literal.get();
-}
-
-fn evaluateBinding(ctx: *IRContext, comptime binding: IRNode.Binding) void {
-    const value = evaluate(ctx, binding.expr.*);
-    ctx.bind(binding.identifier, value);
-}
-
-fn evaluateIdentifier(
-    comptime T: type,
-    ctx: *IRContext,
-    comptime identifier: IRNode.Identifier,
-) T {
-    return ctx.scope.get(T, identifier.identifier) orelse unreachable;
-}
-
-fn evaluateSequence(ctx: *IRContext, comptime sequence: IRNode.Sequence) sequence.last.type {
-    inline for (sequence.body) |node| {
-        _ = evaluate(ctx, node);
-    }
-    return evaluate(ctx, sequence.last.*);
 }

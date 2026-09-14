@@ -1,5 +1,6 @@
 const std = @import("std");
 const ct = @import("comptime2.zig");
+const allocator_mod = @import("allocator.zig");
 
 const Result = union(enum) {
     success: struct {
@@ -15,6 +16,8 @@ const Result = union(enum) {
 };
 
 pub fn main(init: std.process.Init) !void {
+    allocator_mod.allocator = init.gpa;
+
     const compilation_result: Result = comptime brk: {
         @setEvalBranchQuota(10000);
         const file_source = @embedFile("game.gdev");

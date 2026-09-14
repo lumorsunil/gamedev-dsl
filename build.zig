@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "gamdev_dsl",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main2.zig"),
+            .root_source_file = b.path("src/main3.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
