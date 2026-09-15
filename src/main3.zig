@@ -5,7 +5,7 @@ const InstructionPointer = @import("effect-vm.zig").InstructionPointer;
 const A = @import("allocator.zig");
 
 pub fn main(init: std.process.Init) !void {
-    A.allocator = init.gpa;
+    A.allocator = init.arena.allocator();
 
     //
     // effect State a {
@@ -15,6 +15,12 @@ pub fn main(init: std.process.Init) !void {
     //
     // fn printState() {
     //   const state = State.get()
+    // }
+    //
+    // fn run(state_effect: State u64) {
+    //   state_effect.set(42)
+    //   const result = state_effect.get()
+    //   print(result)
     // }
     //
     // fn main() {
@@ -32,23 +38,22 @@ pub fn main(init: std.process.Init) !void {
     //     }
     //   }
     //
-    //   state_effect.set(42)
-    //   const result = state_effect.get()
-    //   print(result)
+    //   run(state_effect)
     // }                                        // END OF TRY/HANDLER SCOPE
     //
 
-    const labels: std.AutoHashMap(InstructionPointer.Label, usize) = .init(A.allocator);
-    defer labels.deinit();
+    var labels: std.StringHashMap(usize) = .init(A.allocator);
+    // defer labels.deinit();
 
-    labels.put(.{ .identifier = "main_try_handle_state" }, 4);
-    labels.put(.{ .identifier = "main_state_effect_handler" }, 10);
+    try labels.put("main_try_handle_state", 5);
+    try labels.put("main_state_effect_handler", 10);
 
     const ir: []const IRInstruction = &.{
-        .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .{ .literal = std.mem.asBytes(@as(usize, 0)) } } } },
-        .{ .instruction_type = .{ .push_handler = .{ .effect_id = 0, .handler_ip = .{ .label = .{ .identifier = "main_state_effect_handler" } } } } },
-        .{ .instruction_type = .{ .jmp = .{ .label = .{ .identifier = "main_try_handle_state" } } } },
+        .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .{ .literal = std.mem.asBytes(&@as(usize, 0)) } } } },
+        .{ .instruction_type = .{ .push_handler = .{ .effect_id = 0, .handler_ip = .{ .label = "main_state_effect_handler" } } } },
+        .{ .instruction_type = .{ .jmp = .{ .ip = .{ .label = "main_try_handle_state" } } } },
         // main_end:
+        .{ .instruction_type = .{ .pop_handler = .{ .effect_id = 0 } } },
         .{ .instruction_type = .ret },
 
         // main_try_handle_state:
@@ -56,22 +61,25 @@ pub fn main(init: std.process.Init) !void {
         .{ .instruction_type = .{ .perform = .{ .effect_id = 0, .operation = "get", .arg_val = .void_ } } },
         .{ .instruction_type = .{ .bind = .{ .identifier = "result", .value = .payload } } },
         .{ .instruction_type = .{ .print = .{ .value = .{ .identifier = "result" } } } },
-        .{ .instruction_type = .{ .pop_handler = .{ .effect_id = 0 } } },
         .{ .instruction_type = .ret },
 
         // main_state_effect_handler:
         .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .{ .literal = "set" }, .ip = .{ .rel = 2 } } } },
-        .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .{ .literal = "get" }, .ip = .{ .rel = 3 } } } },
+        .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .{ .literal = "get" }, .ip = .{ .rel = 5 } } } },
         // State.set
         .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .payload } } },
         .{ .instruction_type = .{ .resume_ = .{ .value = .void_ } } },
+        .{ .instruction_type = .{ .print = .{ .value = .{ .literal = "set after resume" } } } },
+        .{ .instruction_type = .ret },
         // State.get
         .{ .instruction_type = .{ .resume_ = .{ .value = .{ .identifier = "state" } } } },
+        .{ .instruction_type = .{ .print = .{ .value = .{ .literal = "get after resume" } } } },
+        .{ .instruction_type = .ret },
         // State.utils
         // ...
     };
     var vm: VM = try .init(ir, labels);
-    defer vm.deinit();
+    // defer vm.deinit();
 
     try vm.run();
 }

@@ -5,7 +5,7 @@ const A = @import("allocator.zig");
 const IRValue = []u8;
 const IRValueConst = []const u8;
 const EffectId = usize;
-const InstructionPointer = union(enum) {
+pub const InstructionPointer = union(enum) {
     abs: usize,
     rel: usize,
     label: Label,
@@ -17,20 +17,11 @@ const InstructionPointer = union(enum) {
         try switch (self) {
             .abs => |s| writer.print("#{}", .{s}),
             .rel => |s| writer.print("#+{}", .{s}),
-            .label => |s| writer.print("#L{s}.{t}", .{ s.identifier, s.type }),
+            .label => |s| writer.print("#L'{s}'", .{s}),
         };
     }
 
-    pub const Label = struct {
-        identifier: []const u8,
-        type: Type = .label,
-
-        pub const Type = enum {
-            label,
-            start_of_fn,
-            end_of_fn,
-        };
-    };
+    pub const Label = []const u8;
 };
 
 pub const IRValueGeneric = union(enum) {
@@ -55,7 +46,8 @@ pub const IRValueGeneric = union(enum) {
 };
 
 pub const StackFrame = struct {
-    ip: InstructionPointer,
+    label: []const u8,
+    ret_ip: InstructionPointer,
     handlers: std.ArrayList(Handler) = .empty,
     map: std.StringHashMap(V),
     continuations: std.ArrayList(*Continuation) = .empty,
@@ -68,8 +60,8 @@ pub const StackFrame = struct {
     pub const K = []const u8;
     pub const V = IRValue;
 
-    pub fn init(ip: InstructionPointer) @This() {
-        return .{ .ip = ip, .map = .init(A.allocator) };
+    pub fn init(label: []const u8, ip: InstructionPointer) @This() {
+        return .{ .label = label, .ret_ip = ip, .map = .init(A.allocator) };
     }
 
     pub fn deinit(self: *@This()) void {
@@ -81,6 +73,7 @@ pub const StackFrame = struct {
             A.allocator.free(payload);
             self.payload = null;
         }
+        if (self.resume_) |continuation| continuation.deinit();
     }
 
     pub fn clone(self: @This()) !@This() {
@@ -132,6 +125,13 @@ pub const StackFrame = struct {
         return std.mem.bytesAsValue(T, bytes.ptr);
         // return @as(*T, @ptrCast(@alignCast(ptr)));
     }
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("{s}_frame [ret_ip:{f}]", .{ self.label, self.ret_ip });
+    }
 };
 
 pub const Handler = struct {
@@ -159,11 +159,11 @@ pub const VM = struct {
     frames: std.ArrayList(StackFrame) = .empty,
     instructions: []const IRInstruction,
     ip: usize = 0,
-    labels: std.AutoHashMap(InstructionPointer.Label, usize),
+    labels: std.StringHashMap(usize),
 
     pub fn init(
         instructions: []const IRInstruction,
-        labels: std.AutoHashMap(InstructionPointer.Label, usize),
+        labels: std.StringHashMap(usize),
     ) !@This() {
         return .{
             .instructions = instructions,
@@ -177,7 +177,7 @@ pub const VM = struct {
     }
 
     pub fn run(self: *@This()) !void {
-        try self.frames.append(A.allocator, .init(std.math.maxInt(usize)));
+        try self.frames.append(A.allocator, .init("main", .{ .abs = std.math.maxInt(usize) }));
         while (self.ip < self.instructions.len) {
             switch (try self.step()) {
                 .cont => {
@@ -197,6 +197,9 @@ pub const VM = struct {
     pub fn step(self: *@This()) !StepEvent {
         const instruction = self.instructions[self.ip];
 
+        self.log("", .{});
+        self.logStackFrame();
+        self.log("", .{});
         self.logCurrentInstruction();
 
         return switch (instruction.instruction_type) {
@@ -248,6 +251,12 @@ pub const VM = struct {
         std.log.debug(fmt, args);
     }
 
+    fn logStackFrame(self: @This()) void {
+        for (self.frames.items, 0..) |frame, i| {
+            self.log("SF:[{}]: {f}", .{ i, frame });
+        }
+    }
+
     fn logCurrentInstruction(self: @This()) void {
         const instruction = self.instructions[self.ip];
         self.log("[{}] {f}", .{ self.ip, instruction });
@@ -274,10 +283,10 @@ pub const VM = struct {
     }
 
     fn handleReturn(self: *@This()) !StepEvent {
-        var frame = self.popFrame();
-        self.ip = try self.evaluateInstructionPointer(frame.ip);
-        frame.deinit();
-        if (frame.resume_) |resume_| resume_.deinit();
+        const frame = self.popFrame();
+        self.ip = try self.evaluateInstructionPointer(frame.ret_ip);
+        // frame.deinit();
+        // if (frame.resume_) |resume_| resume_.deinit();
         return .cont_no_ip_inc;
     }
 
@@ -289,7 +298,7 @@ pub const VM = struct {
             .saved_vm_fp = self.frames.items.len,
         });
         // NOTE: 2 because of jmp instruction after that jumps to the inner scope
-        self.frames.append(A.allocator, .init(.{ .abs = self.ip + 2 }));
+        try self.frames.append(A.allocator, .init("try_handle", .{ .abs = self.ip + 2 }));
 
         return .cont;
     }
@@ -329,10 +338,10 @@ pub const VM = struct {
         //
         // PERFORM State.get()
         //
-        // [0] main_frame
+        // [0] main_frame (@state = 42)
         // [1] handler_frame_2 (ret ip: end of main_frame)
         //
-        // RESUME
+        // RESUME main_frame.@state
         //
         // [0] main_frame
         // [1] handler_frame_2 (ret ip: end of main_frame)
@@ -342,17 +351,19 @@ pub const VM = struct {
         // OUT OF SCOPE/RETURN (try/handle scope)
         //
         // [0] main_frame
-        // [1] handler_frame_2 (42)
-        // [2] handler_frame (42)
+        // [1] handler_frame_2 (ret ip: end of main_frame)
+        // [2] handler_frame_clone (ret ip: handler_frame.get: after resume)
         //
-        // State.get() continues
+        // State.set() continues
+        //
+        // PRINT main_frame.@state
         //
         // RETURN
         //
         // [0] main_frame
-        // [1] handler_frame (42)
+        // [1] handler_frame_2 (ret ip: end of main_frame)
         //
-        // State.set() continues
+        // State.get() continues
         //
         // RETURN
         //
@@ -364,10 +375,10 @@ pub const VM = struct {
         const continuation = try A.allocator.create(Continuation);
         continuation.* = .init(snapshot_frames, self.ip + 1);
 
-        for (self.frames.items[handler.saved_vm_fp..]) |*frame| frame.deinit();
+        // for (self.frames.items[handler.saved_vm_fp..]) |*frame| frame.deinit();
         self.frames.shrinkRetainingCapacity(handler.saved_vm_fp);
 
-        var handler_frame = StackFrame.init(handler.handler_ip);
+        var handler_frame = StackFrame.init("handler", snapshot_frames[0].ret_ip);
         const evaluated = try self.evaluateValueGenericEnsureExists(perform.arg_val);
         handler_frame.operation = perform.operation;
         handler_frame.payload = try A.allocator.dupe(u8, evaluated);
@@ -375,7 +386,7 @@ pub const VM = struct {
 
         try self.frames.append(A.allocator, handler_frame);
 
-        self.ip = try self.evaluateInstructionPointer(handler_frame.ip);
+        self.ip = try self.evaluateInstructionPointer(handler.handler_ip);
 
         return .cont_no_ip_inc;
     }
@@ -386,8 +397,10 @@ pub const VM = struct {
     ) !StepEvent {
         const handler_frame = self.getCurrentFrame();
         const continuation = handler_frame.resume_ orelse return error.NoContinuationInStackFrame;
-        for (continuation.saved_frames) |frame| {
-            try self.frames.append(A.allocator, try frame.clone());
+        for (continuation.saved_frames, 0..) |frame, i| {
+            var cloned_frame = try frame.clone();
+            if (i == 0) cloned_frame.ret_ip = .{ .abs = self.ip + 1 };
+            try self.frames.append(A.allocator, cloned_frame);
         }
         const target_frame = self.getCurrentFrame();
         if (target_frame.payload) |old_payload| A.allocator.free(old_payload);
@@ -419,7 +432,7 @@ pub const VM = struct {
             .abs => |s| s,
             .rel => |s| self.ip + s,
             .label => |s| self.labels.get(s) orelse {
-                self.log("label \"{s}\" ({t}) not defined", .{ s.identifier, s.type });
+                self.log("label {f} not defined", .{ip});
                 return error.LabelNotDefined;
             },
         };
@@ -572,13 +585,17 @@ pub const IRInstruction = struct {
     };
 
     pub const Print = struct {
+        fmt: []const u8 = "any",
         value: IRValueGeneric,
 
         pub fn format(
-            self: @This(),
+            comptime self: @This(),
             writer: *std.Io.Writer,
         ) std.Io.Writer.Error!void {
-            try writer.print("print {f}", .{self.value});
+            if (comptime @TypeOf(self) == type) {
+                @compileLog("self is: " ++ @typeName(self));
+            }
+            try writer.print("print {" ++ self.fmt ++ "}", .{self.value});
         }
     };
 
