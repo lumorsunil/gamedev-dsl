@@ -13,32 +13,31 @@ pub fn main(init: std.process.Init) !void {
     //   set(new_state: a) void
     // }
     //
-    // fn printState() {
-    //   const state = State.get()
-    // }
-    //
-    // fn run(state_effect: State u64) {
-    //   state_effect.set(42)
-    //   const result = state_effect.get()
-    //   print(result)
-    // }
-    //
     // fn main() {
     //   var state: u64 = 0
     //
     //   state_effect: State u64 {              // START OF TRY/HANDLER SCOPE
     //     get() {
+    //       print("get enter")
+    //       if state == 43 return
     //       resume state
-    //       print("from get: in the end, state was: " + state)
+    //       print("get after resume:")
+    //       print(state)
     //     }
     //     set(v) {
+    //       print("set enter")
     //       state = v
     //       resume
-    //       print("from set: in the end, state was: " + state)
+    //       print("calling second resume")
+    //       state = v + 1
+    //       resume
+    //       print("set after resume")
     //     }
     //   }
     //
-    //   run(state_effect)
+    //   state_effect.set(42)
+    //   const result = state_effect.get()
+    //   print(result)
     // }                                        // END OF TRY/HANDLER SCOPE
     //
 
@@ -49,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     try labels.put("main_state_effect_handler", 10);
 
     const ir: []const IRInstruction = &.{
-        .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .{ .literal = std.mem.asBytes(&@as(usize, 0)) } } } },
+        .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .literal(std.mem.asBytes(&@as(usize, 0))) } } },
         .{ .instruction_type = .{ .push_handler = .{ .effect_id = 0, .handler_ip = .{ .label = "main_state_effect_handler" } } } },
         .{ .instruction_type = .{ .jmp = .{ .ip = .{ .label = "main_try_handle_state" } } } },
         // main_end:
@@ -57,23 +56,30 @@ pub fn main(init: std.process.Init) !void {
         .{ .instruction_type = .ret },
 
         // main_try_handle_state:
-        .{ .instruction_type = .{ .perform = .{ .effect_id = 0, .operation = "set", .arg_val = .{ .literal = std.mem.asBytes(&@as(usize, 42)) } } } },
+        .{ .instruction_type = .{ .perform = .{ .effect_id = 0, .operation = "set", .arg_val = .literal(std.mem.asBytes(&@as(usize, 42))) } } },
         .{ .instruction_type = .{ .perform = .{ .effect_id = 0, .operation = "get", .arg_val = .void_ } } },
         .{ .instruction_type = .{ .bind = .{ .identifier = "result", .value = .payload } } },
-        .{ .instruction_type = .{ .print = .{ .value = .{ .identifier = "result" } } } },
+        .{ .instruction_type = .{ .print = .init(.number, .identifier("result")) } },
         .{ .instruction_type = .ret },
 
         // main_state_effect_handler:
-        .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .{ .literal = "set" }, .ip = .{ .rel = 2 } } } },
-        .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .{ .literal = "get" }, .ip = .{ .rel = 5 } } } },
+        .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .literal("set"), .ip = .{ .rel = 2 } } } },
+        .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .literal("get"), .ip = .{ .rel = 9 } } } },
         // State.set
+        .{ .instruction_type = .{ .print = .init(.string, .literal("set enter")) } },
         .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .payload } } },
         .{ .instruction_type = .{ .resume_ = .{ .value = .void_ } } },
-        .{ .instruction_type = .{ .print = .{ .value = .{ .literal = "set after resume" } } } },
+        .{ .instruction_type = .{ .print = .init(.string, .literal("calling second resume")) } },
+        .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .literal(std.mem.asBytes(&@as(usize, 43))) } } },
+        .{ .instruction_type = .{ .resume_ = .{ .value = .void_ } } },
+        .{ .instruction_type = .{ .print = .init(.string, .literal("set after resume")) } },
         .{ .instruction_type = .ret },
         // State.get
-        .{ .instruction_type = .{ .resume_ = .{ .value = .{ .identifier = "state" } } } },
-        .{ .instruction_type = .{ .print = .{ .value = .{ .literal = "get after resume" } } } },
+        .{ .instruction_type = .{ .print = .init(.string, .literal("get enter")) } },
+        .{ .instruction_type = .{ .jeq = .{ .lhs = .identifier("state"), .rhs = .literal(std.mem.asBytes(&@as(usize, 43))), .ip = .{ .rel = 4 } } } },
+        .{ .instruction_type = .{ .resume_ = .{ .value = .identifier("state") } } },
+        .{ .instruction_type = .{ .print = .init(.string, .literal("get after resume:")) } },
+        .{ .instruction_type = .{ .print = .init(.any, .identifier("state")) } },
         .{ .instruction_type = .ret },
         // State.utils
         // ...

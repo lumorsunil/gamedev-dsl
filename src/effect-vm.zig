@@ -2,8 +2,7 @@ const std = @import("std");
 const Value = @import("value.zig").Value;
 const A = @import("allocator.zig");
 
-const IRValue = []u8;
-const IRValueConst = []const u8;
+const IRValue = []const u8;
 const EffectId = usize;
 pub const InstructionPointer = union(enum) {
     abs: usize,
@@ -25,19 +24,27 @@ pub const InstructionPointer = union(enum) {
 };
 
 pub const IRValueGeneric = union(enum) {
-    literal: IRValueConst,
-    identifier: []const u8,
+    literal_: IRValue,
+    identifier_: []const u8,
     operation,
     payload,
     void_,
+
+    pub fn literal(v: []const u8) @This() {
+        return .{ .literal_ = v };
+    }
+
+    pub fn identifier(identifier_: []const u8) @This() {
+        return .{ .identifier_ = identifier_ };
+    }
 
     pub fn format(
         self: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
         switch (self) {
-            .literal => |s| try writer.print("literal({})", .{s.len}),
-            .identifier => |s| try writer.print("@{s}", .{s}),
+            .literal_ => |s| try writer.print("literal({})", .{s.len}),
+            .identifier_ => |s| try writer.print("@{s}", .{s}),
             .operation => try writer.writeAll("%operation"),
             .payload => try writer.writeAll("%payload"),
             .void_ => try writer.writeAll("void"),
@@ -53,7 +60,8 @@ pub const StackFrame = struct {
     continuations: std.ArrayList(*Continuation) = .empty,
 
     // Handler frame fields
-    operation: ?IRValueConst = null,
+    effect_id: ?usize = null,
+    operation: ?IRValue = null,
     payload: ?IRValue = null,
     resume_: ?*Continuation = null,
 
@@ -197,10 +205,10 @@ pub const VM = struct {
     pub fn step(self: *@This()) !StepEvent {
         const instruction = self.instructions[self.ip];
 
-        self.log("", .{});
-        self.logStackFrame();
-        self.log("", .{});
-        self.logCurrentInstruction();
+        // self.log("", .{});
+        // self.logStackFrame();
+        // self.log("", .{});
+        // self.logCurrentInstruction();
 
         return switch (instruction.instruction_type) {
             .jmp => |s| self.handleJump(s),
@@ -271,8 +279,8 @@ pub const VM = struct {
         const lhs = try self.evaluateValueGenericEnsureExists(jeq.lhs);
         const rhs = try self.evaluateValueGenericEnsureExists(jeq.rhs);
 
-        self.log("lhs={any}", .{lhs});
-        self.log("rhs={any}", .{rhs});
+        // self.log("lhs={any}", .{lhs});
+        // self.log("rhs={any}", .{rhs});
 
         if (std.mem.eql(u8, lhs, rhs)) {
             self.ip = try self.evaluateInstructionPointer(jeq.ip);
@@ -284,6 +292,10 @@ pub const VM = struct {
 
     fn handleReturn(self: *@This()) !StepEvent {
         const frame = self.popFrame();
+        if (frame.effect_id) |effect_id| {
+            const handler = self.findHandler(effect_id) orelse return error.InternalHandlerError;
+            handler.saved_vm_fp -= 1;
+        }
         self.ip = try self.evaluateInstructionPointer(frame.ret_ip);
         // frame.deinit();
         // if (frame.resume_) |resume_| resume_.deinit();
@@ -312,6 +324,7 @@ pub const VM = struct {
 
     fn handlePerform(self: *@This(), perform: IRInstruction.Perform) !StepEvent {
         const handler = self.findHandler(perform.effect_id) orelse return error.UnhandledEffect;
+        defer handler.saved_vm_fp += 1;
 
         // [0] main_frame
         //
@@ -339,31 +352,30 @@ pub const VM = struct {
         // PERFORM State.get()
         //
         // [0] main_frame (@state = 42)
-        // [1] handler_frame_2 (ret ip: end of main_frame)
+        // [1] handler_frame (ret ip: end of main_frame)
+        // [2] handler_frame_2 (ret ip: handler_frame.set: after resume)
         //
         // RESUME main_frame.@state
         //
         // [0] main_frame
-        // [1] handler_frame_2 (ret ip: end of main_frame)
-        // [2] handler_frame_clone (ret ip: handler_frame.get: after resume)
-        // [3] main_frame__state_clone_2 (ret ip: handler_frame.set after resume)
+        // [1] handler_frame (ret ip: end of main_frame)
+        // [2] handler_frame_2 (ret ip: handler_frame.set: after resume)
+        // [3] main_frame__state_clone_2 (ret ip: handler_frame.get after resume)
         //
         // OUT OF SCOPE/RETURN (try/handle scope)
         //
         // [0] main_frame
-        // [1] handler_frame_2 (ret ip: end of main_frame)
-        // [2] handler_frame_clone (ret ip: handler_frame.get: after resume)
+        // [1] handler_frame (ret ip: end of main_frame)
+        // [2] handler_frame_2 (ret ip: handler_frame.set: after resume)
         //
-        // State.set() continues
-        //
-        // PRINT main_frame.@state
+        // State.get() continues
         //
         // RETURN
         //
         // [0] main_frame
-        // [1] handler_frame_2 (ret ip: end of main_frame)
+        // [1] handler_frame (ret ip: end of main_frame)
         //
-        // State.get() continues
+        // State.set() continues
         //
         // RETURN
         //
@@ -380,6 +392,7 @@ pub const VM = struct {
 
         var handler_frame = StackFrame.init("handler", snapshot_frames[0].ret_ip);
         const evaluated = try self.evaluateValueGenericEnsureExists(perform.arg_val);
+        handler_frame.effect_id = perform.effect_id;
         handler_frame.operation = perform.operation;
         handler_frame.payload = try A.allocator.dupe(u8, evaluated);
         handler_frame.resume_ = continuation;
@@ -414,15 +427,26 @@ pub const VM = struct {
 
     fn handlePrint(self: *@This(), print: IRInstruction.Print) !StepEvent {
         const value = try self.evaluateValueGenericEnsureExists(print.value);
-        std.log.debug("{any}", .{value});
+
+        switch (print.fmt) {
+            .string => std.log.debug("{s}", .{value}),
+            .number => std.log.debug("{}", .{std.mem.bytesToValue(usize, value)}),
+            .any => std.log.debug("{any}", .{value}),
+        }
 
         return .cont;
     }
 
     fn handleBind(self: *@This(), bind: IRInstruction.Bind) !StepEvent {
-        const frame = self.getCurrentFrame();
         const evaluated = try self.evaluateValueGenericEnsureExists(bind.value);
-        try frame.map.put(bind.identifier, try A.allocator.dupe(u8, evaluated));
+
+        const binding = self.lookupBinding(bind.identifier) orelse {
+            const frame = self.getCurrentFrame();
+            try frame.map.put(bind.identifier, try A.allocator.dupe(u8, evaluated));
+            return .cont;
+        };
+
+        binding.* = evaluated;
 
         return .cont;
     }
@@ -438,17 +462,17 @@ pub const VM = struct {
         };
     }
 
-    fn evaluateValueGeneric(self: *@This(), value: IRValueGeneric) ?IRValueConst {
+    fn evaluateValueGeneric(self: *@This(), value: IRValueGeneric) ?IRValue {
         return switch (value) {
-            .literal => |s| s,
-            .identifier => |s| self.lookup(s),
+            .literal_ => |s| s,
+            .identifier_ => |s| self.lookup(s),
             .operation => self.getCurrentFrame().operation,
             .payload => self.getCurrentFrame().payload,
             .void_ => &.{},
         };
     }
 
-    fn evaluateValueGenericEnsureExists(self: *@This(), value: IRValueGeneric) !IRValueConst {
+    fn evaluateValueGenericEnsureExists(self: *@This(), value: IRValueGeneric) !IRValue {
         const evaluated = self.evaluateValueGeneric(value) orelse {
             self.log("Couldn't find value {f}", .{value});
             return error.CantFindValue;
@@ -459,11 +483,16 @@ pub const VM = struct {
 
     // TODO: Should we limit only to the current frame to avoid grabbing locals from outside scopes?
     pub fn lookup(self: *@This(), identifier: []const u8) ?IRValue {
+        if (self.lookupBinding(identifier)) |binding| return binding.*;
+        return null;
+    }
+
+    pub fn lookupBinding(self: *@This(), identifier: []const u8) ?*IRValue {
         var frame_index = self.frames.items.len;
         while (frame_index > 0) {
             frame_index -= 1;
             const frame = &self.frames.items[frame_index];
-            if (frame.map.get(identifier)) |value| {
+            if (frame.map.getPtr(identifier)) |value| {
                 return value;
             }
         }
@@ -585,17 +614,20 @@ pub const IRInstruction = struct {
     };
 
     pub const Print = struct {
-        fmt: []const u8 = "any",
+        fmt: Format = .any,
         value: IRValueGeneric,
 
+        pub fn init(fmt: Format, value: IRValueGeneric) @This() {
+            return .{ .fmt = fmt, .value = value };
+        }
+
+        pub const Format = enum { string, number, any };
+
         pub fn format(
-            comptime self: @This(),
+            self: @This(),
             writer: *std.Io.Writer,
         ) std.Io.Writer.Error!void {
-            if (comptime @TypeOf(self) == type) {
-                @compileLog("self is: " ++ @typeName(self));
-            }
-            try writer.print("print {" ++ self.fmt ++ "}", .{self.value});
+            try writer.print("print {f}", .{self.value});
         }
     };
 
