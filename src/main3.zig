@@ -2,90 +2,120 @@ const std = @import("std");
 const VM = @import("effect-vm.zig").VM;
 const IRInstruction = @import("effect-vm.zig").IRInstruction;
 const InstructionPointer = @import("effect-vm.zig").InstructionPointer;
+const Debugger = @import("debugger.zig").Debugger;
 const A = @import("allocator.zig");
 
 pub fn main(init: std.process.Init) !void {
     A.allocator = init.arena.allocator();
 
-    //
-    // effect State a {
-    //   get() a
-    //   set(new_state: a) void
-    // }
-    //
-    // fn main() {
-    //   var state: u64 = 0
-    //
-    //   state_effect: State u64 {              // START OF TRY/HANDLER SCOPE
-    //     get() {
-    //       print("get enter")
-    //       if state == 43 return
-    //       resume state
-    //       print("get after resume:")
-    //       print(state)
-    //     }
-    //     set(v) {
-    //       print("set enter")
-    //       state = v
-    //       resume
-    //       print("calling second resume")
-    //       state = v + 1
-    //       resume
-    //       print("set after resume")
-    //     }
-    //   }
-    //
-    //   state_effect.set(42)
-    //   const result = state_effect.get()
-    //   print(result)
-    // }                                        // END OF TRY/HANDLER SCOPE
-    //
+    const source = @embedFile("test.eftir");
+    var parser = @import("effective-ir-parser.zig").Parser.init(source);
+    var instructions = std.ArrayList(IRInstruction).empty;
+    while (parser.parse() catch |err| {
+        std.log.err("Parser Error: {}", .{err});
+        if (parser.currentToken()) |last_token| {
+            std.log.debug("at: {f}", .{last_token.start});
+            const min_line = @max(1, last_token.start.line -| 1);
+            const max_line = last_token.end.line +| 1;
 
-    var labels: std.StringHashMap(usize) = .init(A.allocator);
-    // defer labels.deinit();
+            var lines = std.mem.splitScalar(u8, source, '\n');
+            var i: usize = 0;
+            while (lines.next()) |line| {
+                i += 1;
+                if (i > max_line) break;
+                if (i >= min_line) {
+                    if (i >= last_token.start.line and i <= last_token.end.line) {
+                        std.log.debug("{}: > {s}", .{ i, line });
+                    } else {
+                        std.log.debug("{}:   {s}", .{ i, line });
+                    }
+                }
+            }
+        }
+        return;
+    }) |instruction| {
+        try instructions.append(A.allocator, instruction);
+        std.log.debug("[{}] {f}", .{ parser.ip, instruction });
+    }
 
-    try labels.put("main_try_handle_state", 5);
-    try labels.put("main_state_effect_handler", 10);
+    const source_map = try parser.source_map.toOwnedSlice(A.allocator);
+    var vm = try VM.init(instructions.items, parser.labels, source_map);
+    runDebugger(init.io, &vm, source_map) catch |err| {
+        // _ = vm.run() catch |err| {
+        std.log.err("VM Error: {}", .{err});
 
-    const ir: []const IRInstruction = &.{
-        .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .literal(std.mem.asBytes(&@as(usize, 0))) } } },
-        .{ .instruction_type = .{ .push_handler = .{ .effect_id = 0, .handler_ip = .{ .label = "main_state_effect_handler" } } } },
-        .{ .instruction_type = .{ .jmp = .{ .ip = .{ .label = "main_try_handle_state" } } } },
-        // main_end:
-        .{ .instruction_type = .{ .pop_handler = .{ .effect_id = 0 } } },
-        .{ .instruction_type = .ret },
+        const curr_line = source_map[vm.ip];
 
-        // main_try_handle_state:
-        .{ .instruction_type = .{ .perform = .{ .effect_id = 0, .operation = "set", .arg_val = .literal(std.mem.asBytes(&@as(usize, 42))) } } },
-        .{ .instruction_type = .{ .perform = .{ .effect_id = 0, .operation = "get", .arg_val = .void_ } } },
-        .{ .instruction_type = .{ .bind = .{ .identifier = "result", .value = .payload } } },
-        .{ .instruction_type = .{ .print = .init(.number, .identifier("result")) } },
-        .{ .instruction_type = .ret },
+        std.log.debug("at: {}", .{curr_line});
+        const min_line = @max(1, curr_line -| 1);
+        const max_line = curr_line +| 1;
 
-        // main_state_effect_handler:
-        .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .literal("set"), .ip = .{ .rel = 2 } } } },
-        .{ .instruction_type = .{ .jeq = .{ .lhs = .operation, .rhs = .literal("get"), .ip = .{ .rel = 9 } } } },
-        // State.set
-        .{ .instruction_type = .{ .print = .init(.string, .literal("set enter")) } },
-        .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .payload } } },
-        .{ .instruction_type = .{ .resume_ = .{ .value = .void_ } } },
-        .{ .instruction_type = .{ .print = .init(.string, .literal("calling second resume")) } },
-        .{ .instruction_type = .{ .bind = .{ .identifier = "state", .value = .literal(std.mem.asBytes(&@as(usize, 43))) } } },
-        .{ .instruction_type = .{ .resume_ = .{ .value = .void_ } } },
-        .{ .instruction_type = .{ .print = .init(.string, .literal("set after resume")) } },
-        .{ .instruction_type = .ret },
-        // State.get
-        .{ .instruction_type = .{ .print = .init(.string, .literal("get enter")) } },
-        .{ .instruction_type = .{ .jeq = .{ .lhs = .identifier("state"), .rhs = .literal(std.mem.asBytes(&@as(usize, 43))), .ip = .{ .rel = 4 } } } },
-        .{ .instruction_type = .{ .resume_ = .{ .value = .identifier("state") } } },
-        .{ .instruction_type = .{ .print = .init(.string, .literal("get after resume:")) } },
-        .{ .instruction_type = .{ .print = .init(.any, .identifier("state")) } },
-        .{ .instruction_type = .ret },
-        // State.utils
-        // ...
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        var i: usize = 0;
+        while (lines.next()) |line| {
+            i += 1;
+            if (i > max_line) break;
+            if (i >= min_line) {
+                if (i == curr_line) {
+                    std.log.debug("{}: > {s}", .{ i, line });
+                } else {
+                    std.log.debug("{}:   {s}", .{ i, line });
+                }
+            }
+        }
+
+        for (vm.frames.items, 0..) |frame, j| {
+            std.log.debug("${}: {f}\n", .{ j, frame });
+        }
     };
-    var vm: VM = try .init(ir, labels);
-    // defer vm.deinit();
 
-    try vm.run();
+    // const tokens = try @import("tokenizer.zig").Tokenizer.tokenize(source);
+    // std.log.debug("tokens:", .{});
+    // for (tokens) |token| std.log.debug("{f}", .{token});
+
+    // const ex = @import("raylib.zig");
+    //
+    // var labels: std.StringHashMap(usize) = .init(A.allocator);
+    // try ex.initLabels(&labels);
+    // const vm: VM = try .init(ex.ir, labels);
+    // // defer vm.deinit();
+    //
+    // // const ret_value = try vm.run();
+    //
+    // try runDebugger(init.io, vm);
+    //
+    // // std.log.debug("final ret_value: {any}", .{ret_value});
+}
+
+fn runDebugger(io: std.Io, vm: *VM, source_map: []const usize) !void {
+    var debugger = Debugger.init(vm, source_map);
+
+    var stdin_buffer: [1024]u8 = undefined;
+
+    const stdin_file = std.Io.File.stdin();
+    var stdin_file_reader = stdin_file.reader(io, &stdin_buffer);
+    const stdin = &stdin_file_reader.interface;
+
+    const stdout_file = std.Io.File.stdout();
+    var stdout_file_writer = stdout_file.writer(io, &.{});
+    const stdout = &stdout_file_writer.interface;
+
+    const stderr_file = std.Io.File.stderr();
+    var stderr_file_writer = stderr_file.writer(io, &.{});
+    const stderr = &stderr_file_writer.interface;
+
+    while (true) {
+        try debugger.printContext(stdout);
+        switch (try debugger.readAndExecuteCommand(stdin, stderr)) {
+            .paused => continue,
+            .finished => |s| {
+                try stdout.print("Debugger finished with return value: {any}", .{s});
+                return;
+            },
+            .err => {
+                try stderr.print("Debugger finished with error.", .{});
+                return error.VMError;
+            },
+        }
+    }
 }

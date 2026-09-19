@@ -1,0 +1,39 @@
+effect Defer {
+  defer(): void
+}
+
+fn while(
+  pred: (): bool,
+  body: (): void,
+) void {
+  if pred() {
+    body()
+    nopushframe while(pred, body)
+  }
+}
+
+fn main() Defer void {
+  const deferred = try {
+    Defer.defer()
+    run_inner()
+    ...
+  } handle Defer {
+    defer() {
+      unwind resume
+    }
+  }
+
+  print("before deffered()")
+  deferred()
+  print("after deffered()")
+}
+
+fn run_inner() void {
+  print("hello from run_inner")
+}
+
+
+// EXPECTED OUTPUT:
+// before deffered()
+// hello from run_inner
+// after deferred()

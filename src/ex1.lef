@@ -1,0 +1,44 @@
+effect State a {
+  get() a
+  set(new_state: a) void
+}
+
+fn main() {
+  var state: u64 = 0
+
+  state_effect: State u64 {              // START OF TRY/HANDLER SCOPE
+    get() {
+      print("get enter")
+      if state == 43 unwind // GO TO END OF TRY/HANDLER SCOPE AND UNWIND THE ENTIRE HANDLER STACK
+      resume state
+      print("get after resume:")
+      print(state)
+      return
+    }
+    set(v) {
+      print("set enter")
+      state = v
+      resume
+      print("calling second resume")
+      state = v + 1
+      resume
+      print("set after resume")
+      return
+    }
+  }
+
+  state_effect.set(42)
+  const result = state_effect.get()
+  print(result)
+}                                        // END OF TRY/HANDLER SCOPE
+
+
+// EXPECTED OUTPUT:
+// set enter
+// get enter
+// 42
+// get after resume:
+// 42
+// calling second resume
+// get enter
+// set after resume

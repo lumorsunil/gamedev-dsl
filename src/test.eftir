@@ -1,0 +1,21 @@
+#def fn f {
+#{f}:
+    push_frame "#{f}"
+#}
+
+#def call f {
+    push_frame "#{f}"
+    ret_ip = ip + 2
+    jmp #{f}
+#}
+
+#def reg_handler id n {
+    push_handler #{id} :#{n}
+    jmp :#{n}_scope
+    pop_handler #{id}
+    ret void
+#}
+
+fn(main)
+    print "hello, world!"
+    ret void

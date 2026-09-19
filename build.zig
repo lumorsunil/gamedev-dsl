@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "gamdev_dsl", .module = mod },
+                .{ .name = "raylib", .module = raylib },
             },
         }),
     });

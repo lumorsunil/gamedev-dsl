@@ -1,0 +1,59 @@
+effect Exception {
+  throw() void
+}
+
+effect State a {
+  get() a
+  set(new_state: a) void
+}
+
+fn main() u64 {
+  var state: u64 = 0
+
+  // START OF TRY/HANDLER SCOPE
+  exception_handler : Exception {
+    throw() {
+      const result = resume()
+      print("an exception was thrown, but I don't care")
+      return result
+    }
+  }
+
+  exception_handler.throw()
+
+  exception_handler : Exception {
+    throw() {
+      print("exception was thrown")
+      unwind state
+    }
+  }
+
+  state_handler: State u64 {
+    get() {
+      if (state == 43) {
+        exception_handler.throw()
+        return state
+      }
+      return resume(state)
+    }
+    set(v) {
+      state = v
+      const result = resume()
+      print("set after resume")
+      return result
+    }
+  }
+
+  state_handler.set(42)
+  const result = state_handler.get()
+  print(result)
+  state_handler.set(43)
+  const result2 = state_handler.get()
+  print(result2)
+  resturn 1
+} // END OF TRY/HANDLER SCOPE
+
+
+// EXPECTED OUTPUT:
+// 42
+// exception was thrown

@@ -1,0 +1,62 @@
+effect Finally {
+  finally((): ()) void
+}
+
+effect State a {
+  get() a
+  set(new_state: a) void
+}
+
+fn main() {
+  var state: u64 = 0
+
+  finally_handler : Finally {              // START OF TRY/HANDLER SCOPE
+    finally(f) {
+      var result = resume()
+      f()
+      return result
+    }
+  }
+
+  state_handler: State u64 {
+    get() {
+      resume(state)
+    }
+    set(v) {
+      state = v
+      resume()
+    }
+  }
+
+  finally_handler.finally(() {
+    print("finally this happened")
+  })
+  state_handler.set(42)
+  const result = state_handler.get()
+  print(result)
+}                                        // END OF TRY/HANDLER SCOPE
+
+fn fetchResult(state_handler: State a) a {
+  finally_handler : Finally {
+    finally(f) {
+      resume()
+      f()
+    }
+  }
+
+  finally_handler.finally(() {
+    print("this should happen after state_handler.get()")
+  })
+  return state_handler.get()
+}
+
+
+// EXPECTED OUTPUT:
+// set enter
+// get enter
+// 42
+// get after resume:
+// 42
+// calling second resume
+// get enter
+// set after resume

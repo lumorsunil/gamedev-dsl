@@ -1,0 +1,21 @@
+#def identifier = /[a-zA-Z_][a-zA-Z_0-9]*/
+
+#def pure /./@x = x
+
+#def fn-param = %{identifier} %{optional : identifier}
+
+#def optional %{any} = 
+
+#def emit-params %{list }
+
+#def if true %{expr} = $expr
+#def if false %{expr} = _
+
+#def %{number} == 0 = 
+
+#def fn %{identifier} ( %{list fn-param}@params ) %{fn-body} =
+  #def $identifier ( %{args-to-params $params}@args ) =
+    #emit .pushFrame
+    #emit .set(.ret_ip, .rel(-2))
+    emit-args args
+    #emit .ret(.void_)

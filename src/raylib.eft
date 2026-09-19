@@ -1,0 +1,38 @@
+effect Finally {
+  finally(f)
+}
+
+fn while(pred, body)
+  if pred()
+    body()
+    nopushframe while(pred, body)
+
+fn main()
+  handle Finally {
+    finally(f, resume) {
+      resume()
+      f()
+    }
+  }
+
+  call extern initWindow(800, 600, "Effective VM Raylib")
+  finally
+    call extern closeWindow()
+
+  var x = 0
+  var y = 0
+
+  while { !call extern windowShouldClose() }
+    if call extern isKeyDown(65)
+      x -= 1
+    if call extern isKeyDown(68)
+      x += 1
+    if call extern isKeyDown(83)
+      y += 1
+    if call extern isKeyDown(87)
+      y -= 1
+    call extern beginDrawing()
+    call extern clearBackground(0)
+    call extern drawRectangle(x, y, 100, 100, 0xFFFFFFFF)
+    call extern drawFPS(5, 5)
+    call extern endDrawing()
