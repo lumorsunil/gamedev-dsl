@@ -1,14 +1,15 @@
 const std = @import("std");
 const A = @import("allocator.zig");
 const VM = @import("effect-vm.zig").VM;
-const IRValue = @import("effect-vm.zig").IRValue;
+const IRValueConst = @import("effect-vm.zig").IRValueConst;
+const Token = @import("tokenizer.zig").Tokenizer.Token;
 
 pub const Debugger = struct {
     vm: *VM,
     breakpoints: std.AutoHashMapUnmanaged(Breakpoint, void) = .empty,
-    source_map: []const usize,
+    source_map: []const Token,
 
-    pub fn init(vm: *VM, source_map: []const usize) @This() {
+    pub fn init(vm: *VM, source_map: []const Token) @This() {
         return .{ .vm = vm, .source_map = source_map };
     }
 
@@ -43,7 +44,12 @@ pub const Debugger = struct {
         return .paused;
     }
 
-    pub fn readAndExecuteCommand(self: *@This(), reader: *std.Io.Reader, stderr: *std.Io.Writer) !DebuggerEvent {
+    pub fn readAndExecuteCommand(
+        self: *@This(),
+        reader: *std.Io.Reader,
+        stdout: *std.Io.Writer,
+        stderr: *std.Io.Writer,
+    ) !DebuggerEvent {
         var line: []const u8 = reader.takeDelimiterExclusive('\n') catch |err| switch (err) {
             std.Io.Reader.DelimiterError.EndOfStream => {
                 try stderr.print("stdin closed", .{});
@@ -77,7 +83,7 @@ pub const Debugger = struct {
                 try stderr.print("usage: bp <line>\n", .{});
                 return .paused;
             };
-            try self.toggleBreakpoint(n);
+            try self.toggleBreakpoint(stdout, n);
             return .paused;
         } else {
             try stderr.print("unknown command \"{s}\"\n", .{line});
@@ -94,22 +100,29 @@ pub const Debugger = struct {
             try writer.print("${}: {f}\n", .{ i, frame });
         }
 
-        const min_line = self.vm.ip -| 3;
-        const max_line = @min(self.vm.ip +| 3, self.vm.instructions.len - 1);
+        const min_ip = self.vm.ip -| 3;
+        const max_ip = @min(self.vm.ip +| 3, self.vm.instructions.len - 1);
 
-        for (min_line..max_line) |i| {
-            var prefix: [3]u8 = .{' '} ** 3;
-            if (i == self.vm.ip) prefix[1] = '>';
-            if (self.breakpoints.contains(.init(i))) prefix[0] = 'B';
-            try writer.print("{s}[{}]{f}\n", .{ prefix, i, self.vm.instructions[i] });
-        }
+        for (min_ip..max_ip) |ip| try self.printSrcInstruction(writer, ip);
     }
 
-    pub fn toggleBreakpoint(self: *@This(), line: usize) !void {
-        if (self.breakpoints.contains(self.mkBreakpoint(line))) {
+    pub fn printSrcInstruction(self: *@This(), writer: *std.Io.Writer, ip: usize) !void {
+        var prefix: [3]u8 = .{' '} ** 3;
+        if (ip == self.vm.ip) prefix[1] = '>';
+        if (self.breakpoints.contains(.init(ip))) prefix[0] = 'B';
+        try writer.print("{s}[{}]{f}\n", .{ prefix, ip, self.vm.instructions[ip] });
+    }
+
+    pub fn toggleBreakpoint(self: *@This(), stdout: *std.Io.Writer, line: usize) !void {
+        const bp = self.mkBreakpoint(line);
+        if (self.breakpoints.contains(bp)) {
             self.removeBreakpoint(line);
+            try stdout.writeAll("removed breakpoint at:\n");
+            try self.printSrcInstruction(stdout, bp.ip);
         } else {
             try self.addBreakpoint(line);
+            try stdout.writeAll("added breakpoint at:\n");
+            try self.printSrcInstruction(stdout, bp.ip);
         }
     }
 
@@ -132,15 +145,19 @@ pub const Debugger = struct {
             return .{ .ip = ip };
         }
 
-        pub fn fromLine(line: usize, source_map: []const usize) @This() {
-            const ip = std.mem.findScalar(usize, source_map, line).?;
+        pub fn fromLine(line: usize, source_map: []const Token) @This() {
+            var ip: usize = 0;
+            for (source_map) |tok| {
+                if (tok.srcLine() == line) break;
+                ip += 1;
+            }
             return .init(ip);
         }
     };
 
     pub const DebuggerEvent = union(enum) {
         err,
-        finished: IRValue,
+        finished: IRValueConst,
         paused,
     };
 };

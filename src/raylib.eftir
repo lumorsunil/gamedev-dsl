@@ -1,123 +1,158 @@
 // TODO: fix multi-handler stack frame handling, State effect does not seem to chop off at the correct spot
 
+#def fn f {
+#{f}:
+#}
+
 #def call f {
-    push_frame "#{f}"
+    push_frame #{'"' ++ f ++ '"'}
     ret_ip = ip + 2
-    jmp #{f}
-}
+    jmp :#{f}
+#}
+
+#def prepare_call f {
+    push_frame #{'"' ++ f ++ '"'}
+#}
+
+#def call_arg n {
+    $0.#{n} =
+#}
+
+#def call_exec f {
+    ret_ip = ip + 2
+    jmp :#{f}
+#}
 
 #def reg_handler id n {
-    push_handler #{id} :#{n}
-    jmp :#{n}_scope
+    push_handler #{id} :#{n ++ "_handler"}
+    jmp :#{n ++ "_handler_scope"}
     pop_handler #{id}
-    ret void
-}
+#}
 
-main:
+#def handler_scope n {
+#{n ++ "_handler_scope"}:
+#}
+
+#def extern n {
+    call_extern #{'"' ++ n ++ '"'}
+#}
+
+fn(main)
     push_frame "main"
     ret_ip = :end
-
-    // finally handler
-    push_handler 0 :finally_handler
-    jmp :finally_handler_scope
-
-main_end:
-    pop_handler 0
+    reg_handler(0, finally)
     ret void
 
-finally_handler_scope:
+// handler_scope(finally)
+//     $0.x = 0 :: i32
+//     $0.y = 0 :: i32
+//     reg_handler(1, state)
+//     ret void
+
+// #def state_get field var {
+//     push_frame #{'"' ++ field ++ "_get" ++ '"'}
+//     perform 1 #{'"' ++ field ++ "_get" ++ '"'}
+//     $0.#{var} = payload
+// #}
+// 
+// #def state_set field var {
+//     push_frame #{'"' ++ field ++ "_set" ++ '"'}
+//     $0.#{field ++ "_"} = $.#{var}
+//     perform 1 #{'"' ++ field ++ "_set" ++ '"'}
+// #}
+
+#def state_get field var {
+    r0 = whereis state_handler_closure
+    $0.#{var} = $[r0].#{field}
+#}
+
+#def state_set field var {
+    r0 = whereis state_handler_closure
+    $[r0].#{field} = $.#{var}
+#}
+
+// handler_scope(state)
+handler_scope(finally)
     $0.x = 0 :: i32
     $0.y = 0 :: i32
-    // state handler
-    push_handler 1 :state_handler
-    jmp :state_handler_scope
-    pop_handler 1
-    ret void
+    $0.state_handler_closure = void
 
-state_handler_scope:
-    // init raylib
-    call_extern "initWindow" [ 800 :: i32 600 :: i32 "EffectVM Raylib" ]
-    call_extern "setWindowPosition" [ 24 :: i32 24 :: i32 ]
     push_frame "finally"
     $0.f = function :main_finally_f
     perform 0 "finally"
 
+    // init raylib
+    extern(initWindow) [ 800 :: i32 600 :: i32 "EffectVM Raylib" ]
+    extern(setWindowPosition) [ 24 :: i32 24 :: i32 ]
+
     // call while
-    push_frame "while"
-
-    // pred lambda
-    $0.pred = function :while_pred
-
-    // body lambda
-    $0.body = function :while_body
-
-    ret_ip = ip + 2
-    jmp :while
+    prepare_call(while)
+    call_arg(pred) function :while_pred
+    call_arg(body) function :while_body
+    call_exec(while)
 
 while_pred:
-    call_extern "windowShouldClose" []
-    jz ret_reg ip + 2
+    extern(windowShouldClose) []
+    jz ret_reg :while_pred_true
+while_pred_false:
+    //free ret_reg
     ret 0 :: u8
+while_pred_true:
+    //free ret_reg
     ret 1 :: u8
 
 while_body:
-    call_extern "isKeyDown" [ 65 :: u32 ]
+    state_get(x, x)
+    state_set(x, x)
+    extern(isKeyDown) [ 65 :: u32 ]
     jz ret_reg :while_body_if_1
-    // State.x_set(State.x_get() - 1)
-    push_frame "x_get"
-    perform 1 "x_get"
-    $0.x = ret_reg
-    $0.x -= 1 :: i32
-    push_frame "x_set"
-    $0.x_ = $.x
-    perform 1 "x_set" 
+    //free ret_reg
+    state_get(x, x)
+    $.x -= 1 :: i32
+    state_set(x, x)
+    //jmp ip + 2
 while_body_if_1:
-    call_extern "isKeyDown" [ 68 :: u32 ]
+    //free ret_reg
+    extern(isKeyDown) [ 68 :: u32 ]
     jz ret_reg :while_body_if_2
-    // State.x_set(State.x_get() + 1)
-    push_frame "x_get"
-    perform 1 "x_get"
-    $0.x = ret_reg
-    $0.x += 1 :: i32
-    push_frame "x_set"
-    $0.x_ = $.x
-    perform 1 "x_set" 
+    //free ret_reg
+    state_get(x, x)
+    $.x += 1 :: i32
+    state_set(x, x)
+    jmp ip + 2
 while_body_if_2:
-    call_extern "isKeyDown" [ 87 :: u32 ]
+    //free ret_reg
+    extern(isKeyDown) [ 87 :: u32 ]
     jz ret_reg :while_body_if_3
-    // State.y_set(State.y_get() - 1)
-    push_frame "y_get"
-    perform 1 "y_get"
-    $0.y = ret_reg
-    $0.y -= 1 :: i32
-    push_frame "y_set"
-    $0.y_ = $.y
-    perform 1 "y_set" 
+    //free ret_reg
+    state_get(y, y)
+    $.y -= 1 :: i32
+    state_set(y, y)
+    //jmp ip + 2
 while_body_if_3:
-    call_extern "isKeyDown" [ 83 :: u32 ]
+    //free ret_reg
+    extern(isKeyDown) [ 83 :: u32 ]
     jz ret_reg :while_body_draw
-    // State.y_set(State.y_get() + 1)
-    push_frame "y_get"
-    perform 1 "y_get"
-    $0.y = ret_reg
-    $0.y += 1 :: i32
-    push_frame "y_set"
-    $0.y_ = $.y
-    perform 1 "y_set" 
+    //free ret_reg
+    state_get(y, y)
+    $.y += 1 :: i32
+    state_set(y, y)
+    //jmp ip + 2
 while_body_draw:
-    call_extern "beginDrawing" []
-    call_extern "clearBackground" [ {77 88 99 255} ]
-    call_extern "drawRectangle" [ $.x $.y 100 :: i32 100 :: i32 {255 255 255 255} ]
-    call_extern "drawFPS" [ 5 :: i32 5 :: i32 ]
-    call_extern "endDrawing" []
+    //free ret_reg
+    extern(beginDrawing) []
+    extern(clearBackground) [ {77 88 99 255} ]
+    extern(drawRectangle) [ $.x $.y 100 :: i32 100 :: i32 {255 255 255 255} ]
+    extern(drawFPS) [ 5 :: i32 5 :: i32 ]
+    extern(endDrawing) []
     ret void
 
 while:
-    push_frame "pred"
+    prepare_call(pred)
     ret_ip = ip + 2
     jmp $.pred
     jz ret_reg :while_end
-    push_frame "body"
+    prepare_call(body)
     ret_ip = ip + 2
     jmp $.body
     jmp :while
@@ -126,35 +161,33 @@ while_end:
 
 finally_handler:
     resume void
-    push_frame "f"
-    ret_ip = ip + 2
-    jmp $.f
+    call(f)
     ret void
 
 main_finally_f:
-    call_extern "closeWindow" []
+    extern(closeWindow) []
     print "now program is complete"
     ret void
 
-state_handler:
-    jeq operation "x_set" :state_handler_x_set
-    jeq operation "y_set" :state_handler_y_set
-    jeq operation "x_get" :state_handler_x_get
-    jeq operation "y_get" :state_handler_y_get
-    ret void
-state_handler_x_set:
-    $.x = $.x_
-    resume void
-    ret void
-state_handler_y_set:
-    $.y = $.y_
-    resume void
-    ret void
-state_handler_x_get:
-    resume $.x
-    ret void
-state_handler_y_get:
-    resume $.y
-    ret void
+// state_handler:
+//     jeq operation "x_set" :state_handler_x_set
+//     jeq operation "y_set" :state_handler_y_set
+//     jeq operation "x_get" :state_handler_x_get
+//     jeq operation "y_get" :state_handler_y_get
+//     ret void
+// state_handler_x_set:
+//     $.x = $.x_
+//     resume void
+//     ret void
+// state_handler_y_set:
+//     $.y = $.y_
+//     resume void
+//     ret void
+// state_handler_x_get:
+//     resume $.x
+//     ret void
+// state_handler_y_get:
+//     resume $.y
+//     ret void
 
 end:

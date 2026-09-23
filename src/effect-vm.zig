@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const A = @import("allocator.zig");
 const rl = @import("raylib");
+const Token = @import("tokenizer.zig").Tokenizer.Token;
 
 const Library = struct {
     pub const Source = rl;
@@ -11,7 +12,8 @@ const Library = struct {
     }
 };
 
-pub const IRValue = []const u8;
+pub const IRValue = []u8;
+pub const IRValueConst = []const u8;
 const EffectId = usize;
 pub const InstructionPointer = union(enum) {
     abs_: usize,
@@ -51,17 +53,21 @@ pub const InstructionPointer = union(enum) {
 };
 
 pub const IRValueGeneric = union(enum) {
-    literal_: IRValue,
+    literal_: IRValueConst,
     identifier_: []const u8,
+    stack_variable: StackVariable,
     pointer_: Pointer,
+    whereis_: WhereIs,
     function_: Function,
     continuation_: *@This().Continuation,
     deref_: Deref,
     operation,
     payload,
+    fp,
     ath_: Ath,
     // TODO: remove when we can have multiple arguments to handler effects/functions in general
     resume_,
+    r0,
     ret_reg,
     pop_frame,
     void_,
@@ -74,12 +80,20 @@ pub const IRValueGeneric = union(enum) {
         return .{ .identifier_ = identifier_ };
     }
 
+    pub fn stackVariable(rel_fp: StackVariable.Fp, identifier_: []const u8) @This() {
+        return .{ .stack_variable = .{ .fp = rel_fp, .identifier = identifier_ } };
+    }
+
     pub fn pointer(pointer_: Pointer) @This() {
         return .{ .pointer_ = pointer_ };
     }
 
     pub fn ath(lhs: *const IRValueGeneric, rhs: *const IRValueGeneric, op: Ath.Op, type_: Ath.Type) @This() {
         return .{ .ath_ = .{ .lhs = lhs, .rhs = rhs, .op = op, .type = type_ } };
+    }
+
+    pub fn whereis(identifier_: []const u8) @This() {
+        return .{ .whereis_ = .{ .identifier = identifier_ } };
     }
 
     pub fn function(ip: InstructionPointer) @This() {
@@ -106,15 +120,35 @@ pub const IRValueGeneric = union(enum) {
         switch (self) {
             .literal_ => |s| try writer.print("literal({})", .{s.len}),
             .identifier_ => |s| try writer.print("@{s}", .{s}),
-            inline .pointer_, .deref_, .function_, .continuation_, .ath_ => |s| try writer.print("{f}", .{s}),
+            .stack_variable => |s| try writer.print("${f}.@{s}", .{ s.fp, s.identifier }),
+            inline .pointer_,
+            .deref_,
+            .function_,
+            .continuation_,
+            .ath_,
+            .whereis_,
+            => |s| try writer.print("{f}", .{s}),
             .operation => try writer.writeAll("%operation"),
             .payload => try writer.writeAll("%payload"),
+            .fp => try writer.writeAll("%fp"),
             .resume_ => try writer.writeAll("%resume"),
+            .r0 => try writer.writeAll("%r0"),
             .ret_reg => try writer.writeAll("%ret"),
             .pop_frame => try writer.writeAll("pop_frame"),
             .void_ => try writer.writeAll("void"),
         }
     }
+
+    pub const WhereIs = struct {
+        identifier: []const u8,
+
+        pub fn format(
+            self: @This(),
+            writer: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            try writer.print("whereis:{s}", .{self.identifier});
+        }
+    };
 
     pub const Function = struct {
         ip: InstructionPointer,
@@ -139,11 +173,42 @@ pub const IRValueGeneric = union(enum) {
         }
     };
 
+    pub const StackVariable = struct {
+        fp: Fp,
+        identifier: []const u8,
+
+        pub fn format(
+            self: @This(),
+            writer: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            try writer.print("${f}.@{s}", .{ self.fp, self.identifier });
+        }
+
+        pub const Fp = union(enum) {
+            unset,
+            abs: usize,
+            rel: isize,
+            rel_value: *IRValueGeneric,
+
+            pub fn format(
+                self: @This(),
+                writer: *std.Io.Writer,
+            ) std.Io.Writer.Error!void {
+                try switch (self) {
+                    .unset => {},
+                    .abs => |s| writer.print("{}", .{s}),
+                    .rel => |s| writer.print("+{}", .{s}),
+                    .rel_value => |s| writer.print("[{f}]", .{s}),
+                };
+            }
+        };
+    };
+
     pub const Pointer = struct {
         addr: Addr,
         mod: Mod = .none,
 
-        pub fn stack(fp: Addr.Stack.Fp, identifier_: []const u8) @This() {
+        pub fn stack(fp: IRValueGeneric.StackVariable.Fp, identifier_: []const u8) @This() {
             return .{ .addr = .{ .stack = .{ .identifier = identifier_, .fp = fp } } };
         }
 
@@ -155,7 +220,7 @@ pub const IRValueGeneric = union(enum) {
         }
 
         pub const Addr = union(enum) {
-            stack: Stack,
+            stack: IRValueGeneric.StackVariable,
 
             pub fn format(
                 self: @This(),
@@ -165,41 +230,6 @@ pub const IRValueGeneric = union(enum) {
                     inline else => |s| try writer.print("{f}", .{s}),
                 }
             }
-
-            pub const Stack = struct {
-                fp: Fp,
-                identifier: []const u8,
-
-                pub fn format(
-                    self: @This(),
-                    writer: *std.Io.Writer,
-                ) std.Io.Writer.Error!void {
-                    try writer.print("{f}.@{s}", .{ self.fp, self.identifier });
-                }
-
-                pub const Fp = union(enum) {
-                    abs_: usize,
-                    rel_: isize,
-
-                    pub fn abs(fp: usize) @This() {
-                        return .{ .abs_ = fp };
-                    }
-
-                    pub fn rel(rel_fp: isize) @This() {
-                        return .{ .rel_ = rel_fp };
-                    }
-
-                    pub fn format(
-                        self: @This(),
-                        writer: *std.Io.Writer,
-                    ) std.Io.Writer.Error!void {
-                        try switch (self) {
-                            .abs_ => |s| writer.print("$({})", .{s}),
-                            .rel_ => |s| writer.print("$+({})", .{s}),
-                        };
-                    }
-                };
-            };
         };
 
         pub const Mod = union(enum) {
@@ -274,20 +304,26 @@ pub const StackFrame = struct {
     ret_ip: InstructionPointer,
     handlers: std.ArrayList(Handler) = .empty,
     map: std.StringHashMap(V),
-    ret_reg: IRValue = &.{},
+    r0: []const u8 = undefined,
+    ret_reg: IRValueConst = &.{},
 
     // Handler frame fields
     effect_id: ?usize = null,
-    operation: ?IRValue = null,
-    payload: ?IRValue = null,
+    operation: ?[]const u8 = null,
+    payload: ?IRValueConst = null,
     // TODO: remove when we can have multiple arguments to handler effects/functions in general
     resume_: ?*Continuation = null,
 
     pub const K = []const u8;
-    pub const V = IRValue;
+    pub const V = IRValueConst;
 
-    pub fn init(label: []const u8, ip: InstructionPointer) @This() {
-        return .{ .label = label, .ret_ip = ip, .map = .init(A.allocator) };
+    pub fn init(label: []const u8, ip: InstructionPointer) !@This() {
+        return .{
+            .label = label,
+            .ret_ip = ip,
+            .map = .init(A.allocator),
+            .r0 = try A.page.alloc(u8, 8),
+        };
     }
 
     pub fn deinit(self: *@This()) void {
@@ -300,6 +336,7 @@ pub const StackFrame = struct {
             self.payload = null;
         }
         if (self.resume_) |continuation| continuation.deinit();
+        A.page.free(self.r0);
     }
 
     pub fn clone(self: @This()) !@This() {
@@ -313,6 +350,7 @@ pub const StackFrame = struct {
         copy.handlers = try copy.handlers.clone(A.allocator);
         copy.payload = if (copy.payload) |payload| try A.allocator.dupe(u8, payload) else null;
         copy.ret_reg = try A.allocator.dupe(u8, copy.ret_reg);
+        copy.r0 = try A.page.dupe(u8, copy.r0);
 
         return copy;
     }
@@ -370,19 +408,20 @@ pub const StackFrame = struct {
     }
 };
 
+// TODO: make fp relative to where the handler is registered
 pub const Handler = struct {
     effect_id: EffectId,
     handler_ip: usize,
-    saved_vm_fp: usize,
-    original_fp: usize,
+    saved_vm_fp_rel: usize,
+    original_fp_rel: usize,
 
     pub fn format(
         self: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
         try writer.print(
-            "handler effect_id:{} handler_ip:{} saved_vm_fp:{} original_fp:{}",
-            .{ self.effect_id, self.handler_ip, self.saved_vm_fp, self.original_fp },
+            "handler effect_id:{} handler_ip:{} saved_vm_fp_rel:{} original_fp_rel:{}",
+            .{ self.effect_id, self.handler_ip, self.saved_vm_fp_rel, self.original_fp_rel },
         );
     }
 };
@@ -407,12 +446,12 @@ pub const VM = struct {
     instructions: []const IRInstruction,
     ip: usize = 0,
     labels: std.StringHashMap(usize),
-    source_map: []const usize,
+    source_map: []const Token,
 
     pub fn init(
         instructions: []const IRInstruction,
         labels: std.StringHashMap(usize),
-        source_map: []const usize,
+        source_map: []const Token,
     ) !@This() {
         return .{
             .instructions = instructions,
@@ -443,7 +482,7 @@ pub const VM = struct {
     pub const StepEvent = union(enum) {
         cont,
         cont_no_ip_inc,
-        ret: IRValue,
+        ret: IRValueConst,
     };
 
     pub fn step(self: *@This()) !StepEvent {
@@ -472,6 +511,7 @@ pub const VM = struct {
             .inc_ => |s| self.handleInc(s),
             .dec_ => |s| self.handleDec(s),
             .set_ => |s| self.handleSet(s),
+            .free_ => |s| self.handleFree(s),
             .print_ => |s| self.handlePrint(s),
         };
     }
@@ -487,7 +527,12 @@ pub const VM = struct {
         return snapshot_frames;
     }
 
-    fn findHandler(self: *@This(), effect_id: EffectId) ?*Handler {
+    const HandlerRegistration = struct {
+        fp: usize,
+        handler: *Handler,
+    };
+
+    fn findHandler(self: *@This(), effect_id: EffectId) ?HandlerRegistration {
         var frame_index = self.frames.items.len;
 
         while (frame_index > 0) {
@@ -500,7 +545,7 @@ pub const VM = struct {
                 const handler = &frame.handlers.items[handler_index];
 
                 if (handler.effect_id == effect_id) {
-                    return handler;
+                    return .{ .fp = frame_index, .handler = handler };
                 }
             }
         }
@@ -587,14 +632,7 @@ pub const VM = struct {
             const info = @typeInfo(@TypeOf(f));
 
             if (comptime info == .@"fn") {
-                comptime {
-                    const function_info = info.@"fn";
-                    var argument_field_list: [function_info.params.len]type = undefined;
-                    for (function_info.params, 0..) |arg, i| {
-                        const T = arg.type orelse continue :next_symbol;
-                        argument_field_list[i] = T;
-                    }
-                }
+                comptime for (info.@"fn".params) |arg| if (arg.type == null) continue :next_symbol;
 
                 if (std.mem.eql(u8, decl.name, call_extern_fn.symbol)) {
                     const Args = std.meta.ArgsTuple(@TypeOf(f));
@@ -607,6 +645,7 @@ pub const VM = struct {
                         switch (@typeInfo(field.type)) {
                             .pointer => |p| {
                                 if (comptime p.child == u8 and p.sentinel() == 0) {
+                                    // TODO: add cleanup of this string after the call
                                     @field(args, field.name) = try std.fmt.allocPrintSentinel(A.allocator, "{s}", .{arg}, 0);
                                 } else if (comptime p.child == u8) {
                                     if (comptime field.type == []u8) {
@@ -650,7 +689,8 @@ pub const VM = struct {
         return self.callCont(continuation, payload);
     }
 
-    fn callCont(self: *@This(), continuation: Continuation, payload: IRValue) !StepEvent {
+    // TODO: Figure out how to (or if we even should) call this with arguments
+    fn callCont(self: *@This(), continuation: Continuation, payload: IRValueConst) !StepEvent {
         for (continuation.saved_frames, 0..) |frame, i| {
             var cloned_frame = try frame.clone();
             if (i == 0) cloned_frame.ret_ip = .{ .abs_ = self.ip + 1 };
@@ -675,22 +715,27 @@ pub const VM = struct {
     fn unwindHandler(self: *@This(), ret_value: IRValueGeneric) !StepEvent {
         const frame = self.getCurrentFrame();
         if (frame.effect_id) |effect_id| {
-            const handler = self.findHandler(effect_id) orelse return error.InternalHandlerError;
-            handler.saved_vm_fp = handler.original_fp;
-            const frames_to_pop = self.frames.items.len - handler.original_fp;
+            const handler_reg = self.findHandler(effect_id) orelse return error.InternalHandlerError;
+            const handler = handler_reg.handler;
+            handler.saved_vm_fp_rel = handler.original_fp_rel;
+            const original_fp = handler.original_fp_rel + handler_reg.fp;
+            const frames_to_pop = self.frames.items.len - original_fp;
             return self.unwindN(frames_to_pop, ret_value);
         }
         return error.UnwindOutsideOfEffectHandler;
     }
 
     fn unwindN(self: *@This(), n: usize, ret_value: IRValueGeneric) !StepEvent {
-        const ret_value_ = try self.evaluateValueGenericEnsureExists(ret_value);
+        var ret_value_ = try self.evaluateValueGenericEnsureExists(ret_value);
+        if (ret_value == .r0) ret_value_ = A.allocator.dupe(u8, ret_value_);
         if (n > 1) {
             for (0..n - 1) |_| {
-                _ = self.popFrame();
+                const popped_frame = self.popFrame();
+                A.page.free(popped_frame.r0);
             }
         }
         const frame_above = self.popFrame();
+        A.page.free(frame_above.r0);
         self.ip = try self.evaluateInstructionPointer(frame_above.ret_ip);
 
         if (self.frames.items.len > 0) {
@@ -703,7 +748,7 @@ pub const VM = struct {
     }
 
     fn handlePushFrame(self: *@This(), push_frame: IRInstruction.PushFrame) !StepEvent {
-        try self.frames.append(A.allocator, .init(push_frame.label, .{ .abs_ = self.ip + 1 }));
+        try self.frames.append(A.allocator, try .init(push_frame.label, .{ .abs_ = self.ip + 1 }));
         return .cont;
     }
 
@@ -712,11 +757,11 @@ pub const VM = struct {
         try frame.pushHandler(.{
             .effect_id = push_handler.effect_id,
             .handler_ip = try self.evaluateInstructionPointer(push_handler.handler_ip),
-            .saved_vm_fp = self.frames.items.len,
-            .original_fp = self.frames.items.len,
+            .saved_vm_fp_rel = 1,
+            .original_fp_rel = 1,
         });
         // NOTE: 2 because of jmp instruction after that jumps to the inner scope
-        try self.frames.append(A.allocator, .init("try_handle", .{ .abs_ = self.ip + 2 }));
+        try self.frames.append(A.allocator, try .init("try_handle", .{ .abs_ = self.ip + 2 }));
 
         return .cont;
     }
@@ -729,17 +774,22 @@ pub const VM = struct {
     }
 
     fn handlePerform(self: *@This(), perform: IRInstruction.Perform) !StepEvent {
-        const handler = self.findHandler(perform.effect_id) orelse return error.UnhandledEffect;
-        defer handler.saved_vm_fp += 1;
+        const handler_reg = self.findHandler(perform.effect_id) orelse return error.UnhandledEffect;
+        const handler = handler_reg.handler;
+        const handler_saved_fp = handler_reg.fp + handler.saved_vm_fp_rel;
+        defer handler.saved_vm_fp_rel += 1;
 
         var handler_frame = self.popFrame();
 
-        const snapshot_frames = try self.dupeFrames(handler.saved_vm_fp);
+        const snapshot_frames = try self.dupeFrames(handler_saved_fp);
         const continuation = try A.allocator.create(Continuation);
         continuation.* = .init(snapshot_frames, self.ip + 1);
 
         // for (self.frames.items[handler.saved_vm_fp..]) |*frame| frame.deinit();
-        self.frames.shrinkRetainingCapacity(handler.saved_vm_fp);
+        for (self.frames.items[handler_saved_fp..]) |*frame| {
+            A.page.free(frame.r0);
+        }
+        self.frames.shrinkRetainingCapacity(handler_saved_fp);
 
         handler_frame.ret_ip = snapshot_frames[0].ret_ip;
         handler_frame.effect_id = perform.effect_id;
@@ -789,6 +839,12 @@ pub const VM = struct {
         return self.callCont(continuation.*, payload);
     }
 
+    fn handleFree(self: *@This(), print: IRInstruction.Free) !StepEvent {
+        const value = try self.evaluateValueGenericEnsureExists(print.value);
+        A.allocator.free(value);
+        return .cont;
+    }
+
     fn handlePrint(self: *@This(), print: IRInstruction.Print) !StepEvent {
         const value = try self.evaluateValueGenericEnsureExists(print.value);
 
@@ -813,15 +869,19 @@ pub const VM = struct {
     fn getValueTarget(
         self: *@This(),
         target: IRInstruction.Set.Arg.Value.Target,
-    ) !*IRValue {
+    ) !*IRValueConst {
         switch (target) {
-            .identifier_ => |identifier| {
-                const binding = self.lookupBinding(identifier) orelse {
-                    std.log.err("identifier \"{s}\" not defined", .{identifier});
+            .stack_variable => |s| {
+                const binding = try self.lookupStackVariable(s) orelse {
+                    std.log.err("stack variable \"{f}\" not defined", .{s});
                     return error.IdentifierNotDefined;
                 };
 
                 return binding;
+            },
+            .r0 => {
+                const frame = self.getCurrentFrame();
+                return &frame.r0;
             },
             .ret_reg => {
                 const frame = self.getCurrentFrame();
@@ -948,13 +1008,17 @@ pub const VM = struct {
         DerefTargetNotFound,
         LabelNotDefined,
         CantFindValue,
+        EvaluatedFramePointerNotAbs,
+        EvaluatedFramePointerTooLarge,
     } || Allocator.Error;
 
-    fn evaluateValueGeneric(self: *@This(), value: IRValueGeneric) EvaluateValueError!?IRValue {
+    fn evaluateValueGeneric(self: *@This(), value: IRValueGeneric) EvaluateValueError!?IRValueConst {
         return switch (value) {
             .literal_ => |s| s,
             .identifier_ => |s| self.lookup(s),
+            .stack_variable => |s| (try self.lookupStackVariable(s) orelse return null).*,
             .pointer_ => |s| self.evaluatePointer(s),
+            .whereis_ => |s| self.evaluateWhereIs(s),
             .ath_ => |s| self.evaluateAth(s),
             .deref_ => |s| {
                 const target = try self.evaluateDeref(s) orelse return null;
@@ -962,6 +1026,7 @@ pub const VM = struct {
             },
             .operation => self.getCurrentFrame().operation,
             .payload => self.getCurrentFrame().payload,
+            .fp => try A.allocator.dupe(u8, std.mem.asBytes(&self.frames.items.len)),
             .resume_ => {
                 const resume_ = self.getCurrentFrame().resume_ orelse {
                     std.log.err("%resume not defined", .{});
@@ -970,6 +1035,7 @@ pub const VM = struct {
 
                 return std.mem.asBytes(resume_);
             },
+            .r0 => self.getCurrentFrame().r0,
             .ret_reg => self.getCurrentFrame().ret_reg,
             .pop_frame => {
                 const frame = self.popFrame();
@@ -997,23 +1063,18 @@ pub const VM = struct {
         _ = mod;
         switch (pointer.addr) {
             .stack => |s| {
-                const fp: usize = switch (s.fp) {
-                    .abs_ => |s_| s_,
-                    .rel_ => |s_| brk: {
-                        const ifp: isize = @intCast(self.frames.items.len);
-                        const result = ifp + s_ - 1;
-                        if (result < 0) {
-                            self.log("fp less than zero", .{});
-                            return error.FramePointerLessThanZero;
-                        }
-                        break :brk @intCast(result);
-                    },
-                };
-                const abs_pointer = IRValueGeneric.Pointer.stack(.abs(fp), s.identifier);
+                const fp = try self.evaluateStackVariableFp(s.fp) orelse return null;
+                if (fp == .unset) return EvaluateValueError.EvaluatedFramePointerNotAbs;
+                const abs_pointer = IRValueGeneric.Pointer.stack(.{ .abs = fp.abs }, s.identifier);
                 const duped = try A.allocator.dupe(u8, std.mem.asBytes(&abs_pointer));
                 return duped;
             },
         }
+    }
+
+    fn evaluateWhereIs(self: *@This(), whereis: IRValueGeneric.WhereIs) !?IRValue {
+        const rel_fp = self.lookupRelativeFp(whereis.identifier) orelse return null;
+        return try A.allocator.dupe(u8, std.mem.asBytes(&rel_fp));
     }
 
     fn evaluateAth(self: *@This(), ath: IRValueGeneric.Ath) !?IRValue {
@@ -1030,8 +1091,8 @@ pub const VM = struct {
     fn evaluateAthWithType(
         _: *@This(),
         comptime T: type,
-        lhs: IRValue,
-        rhs: IRValue,
+        lhs: IRValueConst,
+        rhs: IRValueConst,
         op: IRValueGeneric.Ath.Op,
     ) !IRValue {
         const lhs_ = std.mem.bytesToValue(T, lhs);
@@ -1043,24 +1104,16 @@ pub const VM = struct {
         return try A.allocator.dupe(u8, std.mem.asBytes(&result));
     }
 
-    fn evaluateDeref(self: *@This(), deref: IRValueGeneric.Deref) !?*IRValue {
+    fn evaluateDeref(self: *@This(), deref: IRValueGeneric.Deref) !?*IRValueConst {
         const value = try self.evaluateValueGeneric(deref.value.*) orelse return null;
         const pointer = std.mem.bytesToValue(IRValueGeneric.Pointer, value);
 
-        switch (pointer.addr) {
-            .stack => |stack| {
-                switch (stack.fp) {
-                    .abs_ => |fp| {
-                        const frame = self.frames.items[fp];
-                        return frame.map.getPtr(stack.identifier);
-                    },
-                    .rel_ => unreachable,
-                }
-            },
-        }
+        return switch (pointer.addr) {
+            .stack => |stack| self.lookupStackVariable(stack),
+        };
     }
 
-    fn evaluateValueGenericEnsureExists(self: *@This(), value: IRValueGeneric) !IRValue {
+    fn evaluateValueGenericEnsureExists(self: *@This(), value: IRValueGeneric) !IRValueConst {
         const evaluated = try self.evaluateValueGeneric(value) orelse {
             self.log("Couldn't find value {f}", .{value});
             return error.CantFindValue;
@@ -1069,13 +1122,70 @@ pub const VM = struct {
         return evaluated;
     }
 
+    pub fn lookupRelativeFp(self: *@This(), identifier: []const u8) ?isize {
+        var frame_index = self.frames.items.len;
+        while (frame_index > 0) {
+            frame_index -= 1;
+            const frame = &self.frames.items[frame_index];
+            if (frame.map.contains(identifier)) {
+                return @as(isize, @intCast(frame_index)) - @as(isize, @intCast(self.frames.items.len)) + 1;
+            }
+        }
+
+        return null;
+    }
+
+    pub const EvaluatedFp = union(enum) {
+        unset,
+        abs: usize,
+    };
+
+    pub fn evaluateStackVariableFp(self: *@This(), fp: IRValueGeneric.StackVariable.Fp) !?EvaluatedFp {
+        return switch (fp) {
+            .unset => .unset,
+            .abs => |s| .{ .abs = s },
+            .rel, .rel_value => {
+                const rel_fp = switch (fp) {
+                    .rel => |s| s,
+                    .rel_value => |s| std.mem.bytesToValue(isize, try self.evaluateValueGeneric(s.*) orelse return null),
+                    .abs, .unset => unreachable,
+                };
+                const ifp: isize = @intCast(self.frames.items.len);
+                const result = ifp + rel_fp - 1;
+                if (result < 0) {
+                    self.log("fp less than zero", .{});
+                    return error.FramePointerLessThanZero;
+                }
+                return .{ .abs = @intCast(result) };
+            },
+        };
+    }
+
+    pub fn lookupStackVariable(self: *@This(), stack_variable: IRValueGeneric.StackVariable) !?*IRValueConst {
+        const fp = try self.evaluateStackVariableFp(stack_variable.fp) orelse return null;
+
+        switch (fp) {
+            .abs => |abs_fp| {
+                if (abs_fp >= self.frames.items.len) {
+                    std.log.err("frame pointer larger than or equal to the current number of frames: {} >= {}", .{ abs_fp, self.frames.items.len });
+                    return EvaluateValueError.EvaluatedFramePointerTooLarge;
+                }
+                const frame = self.frames.items[abs_fp];
+                return frame.map.getPtr(stack_variable.identifier);
+            },
+            .unset => {
+                return self.lookupBinding(stack_variable.identifier);
+            },
+        }
+    }
+
     // TODO: Should we limit only to the current frame to avoid grabbing locals from outside scopes?
-    pub fn lookup(self: *@This(), identifier: []const u8) ?IRValue {
+    pub fn lookup(self: *@This(), identifier: []const u8) ?IRValueConst {
         if (self.lookupBinding(identifier)) |binding| return binding.*;
         return null;
     }
 
-    pub fn lookupBinding(self: *@This(), identifier: []const u8) ?*IRValue {
+    pub fn lookupBinding(self: *@This(), identifier: []const u8) ?*IRValueConst {
         var frame_index = self.frames.items.len;
         while (frame_index > 0) {
             frame_index -= 1;
@@ -1341,12 +1451,13 @@ pub const IRInstruction = struct {
                 }
 
                 pub const Target = union(enum) {
-                    identifier_: []const u8,
+                    stack_variable: IRValueGeneric.StackVariable,
                     deref_: Deref,
+                    r0,
                     ret_reg,
 
-                    pub fn identifier(identifier_: []const u8) @This() {
-                        return .{ .identifier_ = identifier_ };
+                    pub fn stackVariable(fp: IRValueGeneric.StackVariable.Fp, identifier_: []const u8) @This() {
+                        return .{ .stack_variable = .{ .fp = fp, .identifier = identifier_ } };
                     }
 
                     pub fn deref(pointer: IRValueGeneric) @This() {
@@ -1358,7 +1469,8 @@ pub const IRInstruction = struct {
                         writer: *std.Io.Writer,
                     ) std.Io.Writer.Error!void {
                         try switch (self) {
-                            .identifier_ => |s| writer.print("@{s}", .{s}),
+                            .stack_variable => |s| writer.print("@{f}", .{s}),
+                            .r0 => writer.print("#r0", .{}),
                             .ret_reg => writer.print("#ret_reg", .{}),
                             .deref_ => |s| writer.print("{f}.*", .{s.pointer}),
                         };
@@ -1511,6 +1623,21 @@ pub const IRInstruction = struct {
         }
     };
 
+    pub const Free = struct {
+        value: IRValueGeneric,
+
+        pub fn init(value: IRValueGeneric) @This() {
+            return .{ .value = value };
+        }
+
+        pub fn format(
+            self: @This(),
+            writer: *std.Io.Writer,
+        ) std.Io.Writer.Error!void {
+            try writer.print("free {f}", .{self.value});
+        }
+    };
+
     pub const Print = struct {
         fmt: Format = .any,
         value: IRValueGeneric,
@@ -1547,6 +1674,7 @@ pub const IRInstruction = struct {
         inc_: Inc,
         dec_: Dec,
         set_: Set,
+        free_: Free,
         print_: Print,
 
         pub fn jmp(ip: InstructionPointer) @This() {
@@ -1649,6 +1777,10 @@ pub const IRInstruction = struct {
 
         pub fn resume_(value: IRValueGeneric) @This() {
             return .{ .resume__ = .{ .value = value } };
+        }
+
+        pub fn free(value: IRValueGeneric) @This() {
+            return .{ .free_ = .{ .value = value } };
         }
 
         pub fn print(fmt: Print.Format, value: IRValueGeneric) @This() {

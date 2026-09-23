@@ -27,7 +27,7 @@ pub const Tokenizer = struct {
         self.marker = self.mkLoc();
     }
 
-    pub fn next(self: *@This()) ?Token {
+    pub fn next(self: *@This()) Error!?Token {
         const c = self.peekChar() orelse return null;
         self.mark();
 
@@ -37,7 +37,7 @@ pub const Tokenizer = struct {
         } else if (std.ascii.isDigit(c)) {
             return self.nextNumber();
         } else return switch (c) {
-            '"' => self.nextString(),
+            '"', '\'' => self.nextString(c),
             '/' => {
                 self.consume(1);
                 if (self.peekChar()) |p| {
@@ -64,7 +64,9 @@ pub const Tokenizer = struct {
                 self.consumeAndReturn(1, .hash),
             '&' => self.consumeAndReturn(1, .ampersand),
             '.' => self.matchString(".*", .dot_star) orelse self.consumeAndReturn(1, .dot),
-            '+' => self.matchString("+=", .plus_equal) orelse self.createFromMarker(.plus),
+            '+' => self.matchString("+=", .plus_equal) orelse
+                self.matchString("++", .double_plus) orelse
+                self.consumeAndReturn(1, .plus),
             '-' => {
                 self.consume(1);
                 if (self.peekChar()) |p| {
@@ -83,7 +85,25 @@ pub const Tokenizer = struct {
                 self.skipWhitespace();
                 return self.next();
             },
-            else => return null,
+            else => {
+                std.log.err("unknown token", .{});
+                var it = std.mem.splitScalar(u8, self.source, '\n');
+                var i: usize = 0;
+                var idx: usize = self.marker.index;
+                while (it.next()) |line| {
+                    i += 1;
+                    if (self.marker.line == i) {
+                        var buffer: [1024]u8 = undefined;
+                        var writer = std.Io.Writer.fixed(&buffer);
+                        _ = try writer.writeSplat(&.{" "}, idx);
+                        try writer.writeByte('^');
+                        std.log.err("at:\n{s}\n{s}", .{ line, writer.buffered() });
+                        break;
+                    }
+                    idx -= line.len + 1;
+                }
+                return Error.UnknownToken;
+            },
         };
     }
 
@@ -176,6 +196,9 @@ pub const Tokenizer = struct {
         }
 
         if (self.tryString(s)) {
+            if (self.peekChar()) |after| if (isIdentifierSuccessor(after)) {
+                return null;
+            };
             return self.createFromMarker(tag);
         } else {
             return null;
@@ -184,7 +207,7 @@ pub const Tokenizer = struct {
 
     pub fn nextIdentifier(self: *@This()) Token {
         while (self.peekChar()) |c| {
-            if (std.ascii.isAlphanumeric(c) or c == '_') {
+            if (isIdentifierSuccessor(c)) {
                 self.consume(1);
                 continue;
             }
@@ -193,6 +216,10 @@ pub const Tokenizer = struct {
         }
 
         return self.createFromMarker(.identifier);
+    }
+
+    fn isIdentifierSuccessor(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_';
     }
 
     pub fn nextNumber(self: *@This()) Token {
@@ -208,11 +235,11 @@ pub const Tokenizer = struct {
         return self.createFromMarker(.number);
     }
 
-    pub fn nextString(self: *@This()) Token {
+    pub fn nextString(self: *@This(), string_marker: u8) Token {
         const start = self.mkLoc();
         self.consume(1);
         while (self.peekChar()) |c| {
-            if (c != '"') {
+            if (c != string_marker) {
                 self.consume(1);
                 continue;
             }
@@ -276,11 +303,13 @@ pub const Tokenizer = struct {
         }
     };
 
+    // TODO: add some metadata here to figure out if the token was generated from a macro yadayada
     pub const Token = struct {
         tag: Tag,
         source: []const u8,
         start: Location,
         end: Location,
+        metadata: Metadata = .empty,
 
         pub fn init(
             source: []const u8,
@@ -300,6 +329,13 @@ pub const Tokenizer = struct {
             return self.source[self.start.index..self.end.index];
         }
 
+        pub fn srcLine(self: @This()) usize {
+            return if (self.metadata.macro_call) |macro_call|
+                macro_call.call_loc.line
+            else
+                self.start.line;
+        }
+
         pub fn format(
             self: @This(),
             writer: *std.Io.Writer,
@@ -310,6 +346,9 @@ pub const Tokenizer = struct {
                     try writer.print("({s})", .{self.lexeme()});
                 },
                 else => {},
+            }
+            if (self.metadata.macro_call) |macro_call| {
+                try writer.print(" from macro call to {s} at L{}", .{ macro_call.macro, macro_call.call_loc.line });
             }
         }
 
@@ -330,6 +369,7 @@ pub const Tokenizer = struct {
             dollar,
             dot,
             plus,
+            double_plus,
             minus,
             star,
             dot_star,
@@ -368,6 +408,11 @@ pub const Tokenizer = struct {
             print,
             operation,
             @"#def",
+            payload,
+            fp,
+            whereis,
+            free,
+            r0,
         };
 
         pub const keywords: []const Tag = &.{
@@ -396,6 +441,30 @@ pub const Tokenizer = struct {
             .print,
             .operation,
             .@"#def",
+            .payload,
+            .fp,
+            .whereis,
+            .free,
+            .r0,
+        };
+
+        pub const Metadata = struct {
+            macro_call: ?MacroCall = null,
+
+            pub const empty = @This(){};
+
+            pub fn macroCall(macro: []const u8, call_token: Token) @This() {
+                return .{ .macro_call = .{ .macro = macro, .call_loc = call_token.start } };
+            }
+
+            pub const MacroCall = struct {
+                macro: []const u8,
+                call_loc: Location,
+            };
         };
     };
+
+    pub const Error = error{
+        UnknownToken,
+    } || std.Io.Writer.Error;
 };
